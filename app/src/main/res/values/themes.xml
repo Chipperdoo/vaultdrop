@@ -1,0 +1,13 @@
+<resources>
+    <!--
+      Compose owns every colour at runtime (Material You / the fallback scheme in
+      ui/theme/Color.kt). This XML theme only covers the pre-Compose launch window,
+      so it is deliberately minimal and matches the dark editor ground.
+    -->
+    <style name="Theme.VaultDrop" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#15130F</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

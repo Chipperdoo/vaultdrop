@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- The cached config points at a SAF grant that does not survive a restore. -->
+    <exclude domain="sharedpref" path="vaultdrop.xml" />
+    <!-- The note index. Names and paths only, but a diary's filenames are its dates. -->
+    <exclude domain="file" path="." />
+</full-backup-content>

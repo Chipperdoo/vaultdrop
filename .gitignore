@@ -1,0 +1,35 @@
+# Gradle
+.gradle/
+build/
+
+# Android build output
+*.apk
+*.aab
+*.ap_
+*.dex
+.cxx/
+
+# Machine-specific: points at this checkout's Android SDK
+local.properties
+
+# Kotlin
+.kotlin/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+
+# Signing material
+*.jks
+*.keystore
+
+# OS
+.DS_Store
+
+# Local tool config
+.claude/settings.local.json
+
+# Working notes
+vaultdrop-findings.html
