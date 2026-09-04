@@ -2,6 +2,9 @@
 .gradle/
 build/
 
+# Written by Gradle updateDaemonJvm; pins a local JDK toolchain
+gradle/gradle-daemon-jvm.properties
+
 # Android build output
 *.apk
 *.aab
