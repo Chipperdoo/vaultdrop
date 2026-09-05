@@ -33,8 +33,8 @@ in Obsidian, so a vault carried to another device behaves the same way there.
 
 ## Requirements
 
-JDK 17 and the Android SDK. The app targets `compileSdk 35` and runs on
-Android 8.0 (`minSdk 26`) and up.
+JDK 17 and the Android SDK. The app builds against `compileSdk 37`, targets
+API 37 (Android 17), and runs on Android 8.0 (`minSdk 26`) and up.
 
 ## Build
 
