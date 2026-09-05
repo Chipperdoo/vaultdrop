@@ -313,6 +313,7 @@ private fun TopBar(
         modifier = Modifier
             .fillMaxWidth()
             .height(T.barHeight)
+            .background(c.surfaceContainerHigh)
             .padding(start = 16.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

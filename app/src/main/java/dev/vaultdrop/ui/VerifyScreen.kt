@@ -96,22 +96,21 @@ fun VerifyScreen(
 
         Spacer(Modifier.weight(1f))
 
-        val buttonAlpha by animateFloatAsState(
-            targetValue = if (ready) 1f else 0f,
-            animationSpec = tween(durationMillis = 220),
-            label = "verifyContinue",
-        )
+        val (buttonBg, buttonText) = if (ready) {
+            c.primary to c.onPrimary
+        } else {
+            c.surfaceContainerHigh to c.onSurfaceVariant
+        }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp)
                 .clip(RoundedCornerShape(28.dp))
-                .background(c.primary)
-                .alpha(buttonAlpha)
+                .background(buttonBg)
                 .clickable(enabled = ready, onClick = onContinue),
             contentAlignment = Alignment.Center,
         ) {
-            Text("Continue", style = T.button, color = c.onPrimary)
+            Text("Continue", style = T.button, color = buttonText)
         }
         Spacer(Modifier.height(18.dp))
 
