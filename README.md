@@ -67,6 +67,11 @@ That third step is the only filesystem operation on the critical path. Nothing
 else is permitted here — no config re-read, no vault scan, no mtime check, no
 network.
 
+If today's note isn't there yet, creating it costs several more round trips out
+to the provider, and those happen *behind* the first frame: the date and a live
+caret are on screen immediately, and the note fills in a moment later. Anything
+typed in the meantime is kept, below the template.
+
 `VaultFiles` is built on document-id arithmetic rather than `DocumentFile`. This
 matters: `DocumentFile.findFile()` lists an entire directory to resolve a single
 name, which is what makes the Storage Access Framework feel slow. A tree grant

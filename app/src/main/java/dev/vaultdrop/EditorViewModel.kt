@@ -3,11 +3,14 @@ package dev.vaultdrop
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.clearText
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.vaultdrop.core.AppConfig
@@ -30,6 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
@@ -45,8 +49,13 @@ data class DayRow(
     val label: String,
     val sub: String,
     val isCurrent: Boolean,
-    /** False means tapping this row is what would create the note. */
-    val exists: Boolean,
+    /**
+     * Whether the day has a note. False means tapping this row is what would
+     * create it; null means nobody has been able to say yet — the walk behind
+     * [DayIndex] has not landed, so there is nothing to answer from until the
+     * provider is asked.
+     */
+    val exists: Boolean?,
 )
 
 data class UiState(
@@ -64,7 +73,6 @@ data class UiState(
     /** The open note's path in the vault, which the delete confirmation names. */
     val notePath: String = "",
     val frontmatter: String = "",
-    val body: TextFieldValue = TextFieldValue(""),
     val fmOpen: Boolean = false,
     val created: Boolean = false,
     val canGoPrev: Boolean = false,
@@ -107,6 +115,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     var state by mutableStateOf(UiState())
         private set
+
+    /**
+     * The note body, owned by the field rather than by [state].
+     *
+     * A keystroke used to copy the whole of [UiState] and invalidate everything
+     * reading it — the top bar, the frontmatter chip, the notice, every overlay
+     * test — for a change only the text field cares about. The field mutates
+     * this in place instead, so a character costs its own relayout and nothing
+     * else. It is also what lets [insertLink] splice a link in without
+     * rebuilding the note around it.
+     */
+    val body = TextFieldState()
 
     private val store = ConfigStore(app)
 
@@ -166,7 +186,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val dayEdits = mutableMapOf<LocalDate, Boolean>()
     private var phase1Done = false
     private var phase2Started = false
-    private var saveJob: Job? = null
+
+    /**
+     * The note-open in flight, and which one it is.
+     *
+     * Only creating a note goes through a job — reading one is a single round
+     * trip and lands in the frame that asked for it. A create that comes back to
+     * find the counter moved on has been navigated past, and drops its result
+     * rather than pulling the screen back to the day it was asked about.
+     */
+    private var openJob: Job? = null
+    private var openGeneration = 0
+
+    /** The day sheet's probes. One sheet's worth at a time. */
+    private var dayProbeJob: Job? = null
 
     /** The one vault walk in flight, whoever started it. */
     private var indexJob: Job? = null
@@ -191,12 +224,40 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var scannedQuery: String? = null
     private val walking: Boolean get() = indexJob?.isActive == true
 
+    init {
+        // The `[[` strip follows the caret. Cheap enough to run per edit:
+        // LinkScan works in indices and never copies the note.
+        viewModelScope.launch {
+            snapshotFlow { body.text to body.selection }.collect { (text, selection) ->
+                onBodyEdited(text, selection.start)
+            }
+        }
+        // Autosave. collectLatest cancels the pending delay whenever the text
+        // moves again, which is the cancel-on-next-keystroke the explicit job
+        // used to do by hand — without a job to allocate and cancel per
+        // character. The first emission arrives before there is a note to save
+        // to, and saveNow stops at that.
+        viewModelScope.launch {
+            snapshotFlow { body.text }.collectLatest {
+                delay(SAVE_DEBOUNCE_MS)
+                saveNow()
+            }
+        }
+    }
+
     // ── Phase 1 ──────────────────────────────────────────────────────────────
 
     /**
      * Runs on the main thread before the first frame, by design: one
      * SharedPreferences read and at most one `openInputStream`. No config
      * re-read, no scan, no mtime check, no network.
+     *
+     * *At most* one, and only ever a read. Today's note usually exists, and then
+     * this is the single round trip the design is built around. When it does not
+     * — the first launch of a new day, which is the case this app is for —
+     * creating it costs a listing per directory in its path, a `createDocument`
+     * and a write, and all of that happens behind the first frame rather than in
+     * front of it. See [createDay].
      */
     fun phase1() {
         if (phase1Done) return
@@ -213,19 +274,30 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // still stamped. Phase 2 refreshes it against the plugin's own file.
         linterConfig = store.loadLinter()
         appConfig = store.loadApp()
-        repo = VaultRepository(VaultFiles(getApplication<Application>(), uri))
-        openDay(LocalDate.now(), create = true, showCreatedNotice = false)
+        val repository = VaultRepository(VaultFiles(getApplication<Application>(), uri))
+        repo = repository
 
-        // Checking the grant costs a binder round trip into the permission
-        // service, so it sits behind the read rather than in front of it: a note
-        // that just opened plainly still has its grant. Only a failure has to ask
-        // whether the permission is gone or the file merely would not open.
-        if (note?.error != null && !hasGrant(uri)) {
-            store.clear()
-            repo = null
-            note = null
-            state = UiState(screen = Screen.FirstRun)
-            return
+        val today = LocalDate.now()
+        val existing = repository.readNote(cached, today)
+        if (existing != null) {
+            // The one filesystem operation on the critical path, and it worked.
+            // Nothing asks about the grant: a note that just opened plainly
+            // still has one, and asking costs a binder round trip of its own.
+            adopt(++openGeneration, existing, today, showCreatedNotice = false)
+        } else {
+            // No note for today yet — or no permission left to see it. The grant
+            // is worth its round trip only here, and only ahead of the create:
+            // it is what keeps the editor from flashing up for a vault we have
+            // lost, and it is far cheaper than the create it now stands in front
+            // of rather than behind.
+            if (!hasGrant(uri)) {
+                store.clear()
+                repo = null
+                note = null
+                state = UiState(screen = Screen.FirstRun)
+                return
+            }
+            createDay(today, showCreatedNotice = false)
         }
         state = state.copy(screen = Screen.Editor, config = cached, configMissing = !cached.present)
     }
@@ -344,10 +416,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
 
             // 3. Index: serve the cache first, then refresh it.
-            val cache = WikiIndex.load(getApplication<Application>())
-            if (cache != null && cache.size > 0) {
+            // An empty cache is no cache: it serves nothing and it is not
+            // evidence that the vault was walked recently either.
+            val cache = WikiIndex.load(getApplication<Application>())?.takeIf { it.size > 0 }
+            if (cache != null) {
                 index = cache
-                val days = buildDayIndex(cache.byPath.keys)
+                val days = buildDayIndex(cache.paths)
                 withContext(Dispatchers.Main) {
                     state = state.copy(indexing = false, indexSize = cache.size)
                     adoptDayIndex(days)
@@ -356,12 +430,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
 
+            // A walk is one cursor per directory in the vault, into the same
+            // provider the editor has just read today's note out of. A cache
+            // written minutes ago is worth more than the notes a walk would add
+            // to it, so the launch pass takes the same staleness rule the resume
+            // pass does. Reindex vault is there for when you want one regardless.
+            val age = System.currentTimeMillis() - WikiIndex.savedAt(getApplication<Application>())
+            if (cache != null && age < RESUME_REINDEX_AFTER_MS) return@launch
+
             // Then the listings themselves, which open no files at all.
             val startedAt = System.currentTimeMillis()
             val names = repository.buildNameIndex()
             ensureActive() // the vault may have been changed out from under the walk
             val elapsed = System.currentTimeMillis() - startedAt
-            val coldBuild = cache == null || cache.size == 0
+            val coldBuild = cache == null
             publishNames(
                 names,
                 notice = if (coldBuild) {
@@ -383,7 +465,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun publishNames(names: WikiIndex, notice: String?) {
         index = names
         WikiIndex.save(getApplication<Application>(), names)
-        val days = buildDayIndex(names.byPath.keys)
+        val days = buildDayIndex(names.paths)
         withContext(Dispatchers.Main) {
             adoptDayIndex(days)
             state = state.copy(
@@ -428,13 +510,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Editing ──────────────────────────────────────────────────────────────
 
-    fun onBodyChange(value: TextFieldValue) {
-        val query = LinkScan.queryAt(value.text, value.selection.start)
+    /**
+     * What an edit to [body] costs, off the field's own observer.
+     *
+     * Typing outside a `[[` is every other keystroke, and it must cost nothing:
+     * the strip is already closed and already has no query, so there is nothing
+     * to write and no reason to copy [UiState]. Only a change to the strip's own
+     * state is worth a frame.
+     */
+    private fun onBodyEdited(text: CharSequence, caret: Int) {
+        val query = LinkScan.queryAt(text, caret)
         val open = query != null
+        if (open == state.linkOpen && query.orEmpty() == state.linkQuery) return
 
-        state = state.copy(body = value, linkOpen = open, linkQuery = query.orEmpty())
+        state = state.copy(linkOpen = open, linkQuery = query.orEmpty())
         if (open) scheduleLinkMatches() else linkJob?.cancel()
-        scheduleSave()
     }
 
     /**
@@ -462,33 +552,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Completes the `[[` the user was already typing. */
+    /**
+     * Completes the `[[` the user was already typing.
+     *
+     * Splices the link into the field's own buffer. Rebuilding the note around
+     * it — two substrings of the whole thing and a concatenation — copied a
+     * diary entry three times over to insert nine characters into it.
+     */
     fun insertLink(name: String) {
-        val value = state.body
-        val caret = value.selection.start.coerceIn(0, value.text.length)
-        val cut = LinkScan.openBracketBefore(value.text, caret)
+        val caret = body.selection.start.coerceIn(0, body.text.length)
+        val cut = LinkScan.openBracketBefore(body.text, caret)
         if (cut == -1) return
         val replacement = "[[$name]] "
-        val text = value.text.take(cut) + replacement + value.text.substring(caret)
-        val at = cut + replacement.length
-        state = state.copy(
-            body = TextFieldValue(text, TextRange(at)),
-            linkOpen = false,
-            linkQuery = "",
-        )
-        scheduleSave()
+        body.edit {
+            replace(cut, caret, replacement)
+            selection = TextRange(cut + replacement.length)
+        }
+        state = state.copy(linkOpen = false, linkQuery = "")
     }
 
     fun toggleFrontmatter() {
         state = state.copy(fmOpen = !state.fmOpen)
-    }
-
-    private fun scheduleSave() {
-        saveJob?.cancel()
-        saveJob = viewModelScope.launch {
-            delay(SAVE_DEBOUNCE_MS)
-            saveNow()
-        }
     }
 
     /**
@@ -501,16 +585,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun saveNow() {
         val repository = repo ?: return
         val current = note ?: return
-        val body = state.body.text
-        if (body == savedBody) return
-        savedBody = body
+        val text = body.text.toString()
+        if (text == savedBody) return
+        savedBody = text
 
         viewModelScope.launch(Dispatchers.IO) {
-            val written = repository.save(current, body, linterConfig)
+            val written = repository.save(current, text, linterConfig)
             if (written == null) {
                 // Don't go on believing this body reached the file — let the next
                 // save try again instead of stranding it behind the skip check.
-                withContext(Dispatchers.Main) { if (savedBody == body) savedBody = null }
+                withContext(Dispatchers.Main) { if (savedBody == text) savedBody = null }
                 return@launch
             }
             if (written == current.frontmatter) return@launch
@@ -555,47 +639,124 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * means the vault has moved on underneath the walk; correcting the index and
      * staying put is the honest answer, not writing the note the user was only
      * navigating past.
+     *
+     * The read stays on the main thread. It is one round trip, it lands inside
+     * the frame the tap was in, and there is no honest thing to show in the
+     * meantime — the day on screen would be neither the old one nor the new one.
+     * Creating is the half that moves off it; see [createDay].
      */
     private fun openDay(date: LocalDate, create: Boolean, showCreatedNotice: Boolean) {
         val repository = repo ?: return
-        val opened = if (create) {
-            repository.openNote(
-                config = activeConfig,
-                date = date,
-                now = LocalDateTime.now(),
-                templateCache = templateCache,
-                linter = linterConfig,
-            )
-        } else {
-            repository.readNote(activeConfig, date) ?: run {
+        val generation = ++openGeneration
+        val existing = repository.readNote(activeConfig, date)
+        when {
+            existing != null -> adopt(generation, existing, date, showCreatedNotice)
+            create -> createDay(date, showCreatedNotice)
+            else -> {
                 recordDays(mapOf(date to false))
                 state = state.copy(
                     notice = "${DailyNote.label(activeConfig, date)} is not in the vault any more.",
                 )
-                return
             }
         }
+    }
+
+    /**
+     * The miss half of [openDay], behind the frame rather than in front of it.
+     *
+     * Creating a note is a listing per directory in its path, a `createDocument`
+     * and a write — three to six round trips out to the provider. That is far
+     * too much to hold a frame for, and it is exactly what the first launch of
+     * every new day used to pay before anything reached the screen. The editor
+     * takes the new day straight away, empty and with a live caret, and the note
+     * fills in behind it.
+     */
+    private fun createDay(date: LocalDate, showCreatedNotice: Boolean) {
+        val repository = repo ?: return
+        val generation = ++openGeneration
+        openJob?.cancel()
+
+        // Everything the screen needs that the file cannot tell us: the label is
+        // the date through the config's own format, and the edges come off the
+        // day index. Neither waits on the provider.
+        note = null
+        savedBody = ""
+        openDate = date
+        anchoredTo = LocalDate.now()
+        body.clearText()
+        state = state.copy(
+            dateLabel = DailyNote.label(activeConfig, date),
+            notePath = "",
+            frontmatter = "",
+            created = false,
+            fmOpen = false,
+            linkOpen = false,
+            linkQuery = "",
+            notice = null,
+            daysOpen = false,
+        )
+        refreshEdges()
+
+        openJob = viewModelScope.launch {
+            val opened = withContext(Dispatchers.IO) {
+                repository.openNote(
+                    config = activeConfig,
+                    date = date,
+                    now = LocalDateTime.now(),
+                    templateCache = templateCache,
+                    linter = linterConfig,
+                )
+            }
+            // Navigated on while we were away. Say nothing and change nothing:
+            // the day this was asked about is not the day on screen any more.
+            if (generation != openGeneration) return@launch
+            adopt(generation, opened, date, showCreatedNotice, fromCreate = true)
+        }
+    }
+
+    /**
+     * Puts an opened note on screen.
+     *
+     * [fromCreate] marks the second half of [createDay], and changes two things.
+     * Anything typed while the file was being made belongs *after* the template,
+     * which is where the caret was — the end of an empty note; leaving
+     * [savedBody] on the seed is what sends the next autosave after it, because
+     * the file has only the seed in it. And the notice is left alone rather than
+     * cleared: the navigation itself already cleared it, so anything on screen
+     * now was raised *since*, and is newer than the note landing. Clearing it
+     * here ate the "moved to .trash/" line when the deleted note was the last
+     * one in the vault.
+     */
+    private fun adopt(
+        generation: Int,
+        opened: OpenNote,
+        date: LocalDate,
+        showCreatedNotice: Boolean,
+        fromCreate: Boolean = false,
+    ) {
+        if (generation != openGeneration) return
         note = opened
         savedBody = opened.body
         openDate = date
         anchoredTo = LocalDate.now()
 
-        val notice = when {
-            opened.error != null -> opened.error
-            opened.created && showCreatedNotice -> createdNotice(opened)
-            else -> null
-        }
+        val typed = if (fromCreate) body.text.toString() else ""
+        body.setTextAndPlaceCursorAtEnd(if (typed.isEmpty()) opened.body else opened.body + typed)
 
         state = state.copy(
             dateLabel = DailyNote.label(activeConfig, date),
             notePath = opened.path.relativePath,
             frontmatter = opened.frontmatter,
-            body = TextFieldValue(opened.body, TextRange(opened.body.length)),
             created = opened.created,
             fmOpen = false,
             linkOpen = false,
             linkQuery = "",
-            notice = notice,
+            notice = when {
+                opened.error != null -> opened.error
+                opened.created && showCreatedNotice -> createdNotice(opened)
+                fromCreate -> state.notice
+                else -> null
+            },
             daysOpen = false,
         )
         // A note this session just wrote is not in the walk the index came from,
@@ -677,31 +838,31 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * Moves the open note to `.trash/`, then falls back to the nearest note
      * either side of the day it occupied.
      *
-     * The debounced save is cancelled and then finished by hand first. Both
-     * halves matter: a write that landed *after* the move would put the note
-     * straight back, and a trashed copy missing the last thing typed is a worse
+     * The note in hand is dropped up front and the save is then finished by
+     * hand. Both halves matter: [saveNow] and the debounce behind it both stop
+     * at a null note, so nothing can write after the move and put the file
+     * straight back — and a trashed copy missing the last thing typed is a worse
      * copy to recover than a complete one.
      */
     fun confirmDelete() {
         val repository = repo ?: return
         val current = note ?: return
         val date = openDate
-        saveJob?.cancel()
+        note = null
         state = state.copy(deleteOpen = false)
 
         viewModelScope.launch {
-            val body = state.body.text
+            val text = body.text.toString()
             val trashed = withContext(Dispatchers.IO) {
-                if (body != savedBody) repository.save(current, body, linterConfig)
+                if (text != savedBody) repository.save(current, text, linterConfig)
                 repository.trash(current, appConfig.trash)
             }
             if (trashed == null) {
+                // Still where it was, so saving can resume against it.
+                note = current
                 state = state.copy(notice = "Could not delete ${current.path.relativePath}.")
                 return@launch
             }
-            // Drop the note in hand before anything reopens: an autosave firing
-            // against a uri that is no longer there would only fail anyway.
-            note = null
             savedBody = null
             dropFromIndex(current.path.relativePath)
             recordDays(mapOf(date to false))
@@ -740,36 +901,69 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Tapping the date opens the sheet.
+     *
+     * The rows come off [dayIndex] and are on screen in the frame the tap was
+     * in. The sheet used to build them from a provider probe per day before it
+     * could show anything at all, which meant seven round trips of the previous
+     * open's rows sitting there — for days the index already knew about.
+     *
+     * The probes still happen, because the walk behind the index is always a
+     * little behind the vault: they run strictly newest-first, so today is
+     * confirmed after one round trip rather than after all seven, and each row
+     * settles the moment its own answer lands.
+     */
     fun openDays() {
         val repository = repo ?: return
-        state = state.copy(daysOpen = true, linkOpen = false)
-        viewModelScope.launch(Dispatchers.IO) {
-            val today = LocalDate.now()
-            val folder = activeConfig.folder.ifEmpty { "vault root" }
-            val rows = (0 until DAY_SHEET_SPAN).map { back ->
+        val today = LocalDate.now()
+        val known = dayIndex
+        state = state.copy(
+            daysOpen = true,
+            linkOpen = false,
+            days = (0 until DAY_SHEET_SPAN).map { back ->
+                dayRow(today.minusDays(back.toLong()), known?.contains(today.minusDays(back.toLong())))
+            },
+        )
+
+        dayProbeJob?.cancel()
+        dayProbeJob = viewModelScope.launch {
+            for (back in 0 until DAY_SHEET_SPAN) {
                 val date = today.minusDays(back.toLong())
-                val exists = repository.exists(activeConfig, date)
-                DayRow(
-                    date = date,
-                    label = DailyNote.label(activeConfig, date),
-                    sub = buildString {
-                        if (back == 0) append("today · ")
-                        append(folder)
-                        append(if (exists) " · exists" else " · not created yet")
-                        if (!exists && activeConfig.template.isNotBlank()) append(" · will render template")
-                    },
-                    isCurrent = date == openDate,
-                    exists = exists,
-                )
-            }
-            withContext(Dispatchers.Main) {
-                state = state.copy(days = rows)
+                val exists = withContext(Dispatchers.IO) { repository.exists(activeConfig, date) }
+                if (state.daysOpen) {
+                    state = state.copy(
+                        days = state.days.map { if (it.date == date) dayRow(date, exists) else it },
+                    )
+                }
                 // The sheet asked the provider itself, which beats the walk behind
                 // the day index for exactly the days most likely to have moved.
-                recordDays(rows.associate { it.date to it.exists })
+                // Worth finishing even if the sheet has gone: it is what the
+                // chevrons on whatever day was picked are read off.
+                recordDays(mapOf(date to exists))
             }
         }
     }
+
+    /** One sheet row. [exists] is null while nobody can say yet. */
+    private fun dayRow(date: LocalDate, exists: Boolean?): DayRow = DayRow(
+        date = date,
+        label = DailyNote.label(activeConfig, date),
+        sub = buildString {
+            if (date == LocalDate.now()) append("today · ")
+            append(activeConfig.folder.ifEmpty { "vault root" })
+            when (exists) {
+                true -> append(" · exists")
+                false -> {
+                    append(" · not created yet")
+                    if (activeConfig.template.isNotBlank()) append(" · will render template")
+                }
+                null -> append(" · checking…")
+            }
+        },
+        isCurrent = date == openDate,
+        exists = exists,
+    )
 
     fun closeDays() {
         state = state.copy(daysOpen = false)
@@ -866,7 +1060,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         state = state.copy(searchScanning = true, searchStats = "reading 0 of ${snapshot.size} notes…")
 
         scanJob = viewModelScope.launch {
-            val search = VaultSearch(VaultFiles(getApplication<Application>(), repository.treeUri))
+            val search = VaultSearch(repository.files)
             val startedAt = System.currentTimeMillis()
             val result = withContext(Dispatchers.Default) {
                 search.run(snapshot, query) { scanned, hits ->
@@ -911,9 +1105,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun readFull(entry: IndexEntry, onLoaded: (String) -> Unit) {
         val repository = repo ?: return
         viewModelScope.launch {
-            val text = withContext(Dispatchers.IO) {
-                VaultFiles(getApplication<Application>(), repository.treeUri).readText(entry.path)
-            }
+            val text = withContext(Dispatchers.IO) { repository.files.readText(entry.path) }
             onLoaded(text ?: "Could not read ${entry.path}.")
         }
     }
@@ -931,6 +1123,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         searchJob?.cancel()
         scanJob?.cancel()
         linkJob?.cancel()
+        openJob?.cancel()
+        dayProbeJob?.cancel()
         scannedQuery = null
         store.clear()
         WikiIndex.clear(getApplication<Application>())
@@ -940,6 +1134,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         index = WikiIndex.EMPTY
         templateCache = null
         linterConfig = LinterConfig()
+        body.clearText()
         savedBody = null
         openDate = LocalDate.now()
         anchoredTo = openDate

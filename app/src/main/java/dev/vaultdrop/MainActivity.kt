@@ -90,7 +90,7 @@ fun VaultDropApp(vm: EditorViewModel) {
 
         else -> EditorScreen(
             state = state,
-            onBodyChange = vm::onBodyChange,
+            body = vm.body,
             onToggleFrontmatter = vm::toggleFrontmatter,
             onOpenDays = vm::openDays,
             onCloseDays = vm::closeDays,

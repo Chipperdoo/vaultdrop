@@ -16,10 +16,19 @@ data class OpenNote(
     val error: String? = null,
 )
 
-/** Everything the vault can be asked for. Phase 1 uses only [openNote]. */
-class VaultRepository(private val files: VaultFiles) {
+/**
+ * What every settings file in `.obsidian/` carries so Phase 2 can tell whether
+ * it moved without reading it.
+ */
+interface Probed {
+    /** False when the file was absent and the value is pure defaults. */
+    val present: Boolean
+    val sha256: String
+    val lastModified: Long
+}
 
-    val treeUri: Uri get() = files.treeUri
+/** Everything the vault can be asked for. Phase 1 uses only [openNote]. */
+class VaultRepository(val files: VaultFiles) {
 
     // ── Validation and config ────────────────────────────────────────────────
 
@@ -27,92 +36,65 @@ class VaultRepository(private val files: VaultFiles) {
     fun isVault(): Boolean = files.metadata(VaultFiles.OBSIDIAN_DIR) != null
 
     /**
-     * Reads and parses `.obsidian/daily-notes.json`.
+     * One settings file, and how to turn it into a value.
      *
-     * A vault with Daily Notes never opened has no config file at all; that is
-     * not an error, it is the defaults column of the brief's table.
+     * All three are read the same way and probed the same way — the same
+     * read-hash-parse going in, the same mtime-then-hash test for whether the
+     * file moved. Only the path and the parse differ, so only those are written
+     * out three times.
      */
-    fun readConfig(now: Long = System.currentTimeMillis()): VaultConfig {
-        val bytes = files.readBytes(VaultFiles.CONFIG_PATH)
-            ?: return VaultConfig(present = false, lastReadAt = now)
-        val meta = files.metadata(VaultFiles.CONFIG_PATH)
-        return VaultConfig.parse(
-            raw = bytes.toString(Charsets.UTF_8),
-            sha256 = Hashing.sha256(bytes),
-            lastModified = meta?.lastModified ?: 0L,
-            now = now,
-        )
-    }
+    private class Settings<T : Probed>(
+        val path: String,
+        /** The value for a vault that does not have this file. Never an error: a
+         *  vault with Daily Notes never opened, or the Linter never installed, or
+         *  no setting ever changed from its default, simply has no file. */
+        val absent: (now: Long) -> T,
+        val parse: (raw: String, sha256: String, lastModified: Long, now: Long) -> T,
+    )
 
-    /** Phase 2 step 1. Cheap mtime probe first; only hash if the stamp moved. */
-    fun configChangedSince(cached: VaultConfig): VaultConfig? {
-        val meta = files.metadata(VaultFiles.CONFIG_PATH)
-        if (meta == null) {
-            // The file was deleted since we cached it.
-            return if (cached.present) VaultConfig(present = false, lastReadAt = System.currentTimeMillis()) else null
-        }
-        if (cached.present && meta.lastModified == cached.lastModified) return null
-        val fresh = readConfig()
-        return if (fresh.sha256 == cached.sha256 && cached.present) null else fresh
+    /**
+     * Reads and parses one settings file.
+     *
+     * [meta] is the stamp a probe has already been out to fetch. Passing it back
+     * in is what keeps [probe] to a single round trip when the file has moved:
+     * this used to go and ask the provider for the same mtime a second time.
+     */
+    private fun <T : Probed> read(settings: Settings<T>, now: Long, meta: VaultFiles.Meta?): T {
+        val bytes = files.readBytes(settings.path) ?: return settings.absent(now)
+        val stamp = (meta ?: files.metadata(settings.path))?.lastModified ?: 0L
+        return settings.parse(bytes.toString(Charsets.UTF_8), Hashing.sha256(bytes), stamp, now)
     }
 
     /**
-     * Reads and parses the Linter plugin's own settings file.
+     * Phase 2's freshness test: the cheap mtime probe first, and only hash the
+     * file if the stamp moved.
      *
-     * A vault without the plugin has no file at all; that is not an error, it is
-     * the rule being off — exactly as `daily-notes.json` missing is the defaults.
+     * @return the new value, or null if the file has not changed since [cached].
      */
-    fun readLinter(now: Long = System.currentTimeMillis()): LinterConfig {
-        val bytes = files.readBytes(LinterConfig.PATH)
-            ?: return LinterConfig(present = false, lastReadAt = now)
-        val meta = files.metadata(LinterConfig.PATH)
-        return LinterConfig.parse(
-            raw = bytes.toString(Charsets.UTF_8),
-            sha256 = Hashing.sha256(bytes),
-            lastModified = meta?.lastModified ?: 0L,
-            now = now,
-        )
-    }
-
-    /**
-     * Reads `.obsidian/app.json`, the vault's own application settings.
-     *
-     * A vault that has never had a setting changed from its default has no file
-     * at all; that is not an error, it is Obsidian's defaults.
-     */
-    fun readAppConfig(now: Long = System.currentTimeMillis()): AppConfig {
-        val bytes = files.readBytes(AppConfig.PATH)
-            ?: return AppConfig(present = false, lastReadAt = now)
-        val meta = files.metadata(AppConfig.PATH)
-        return AppConfig.parse(
-            raw = bytes.toString(Charsets.UTF_8),
-            sha256 = Hashing.sha256(bytes),
-            lastModified = meta?.lastModified ?: 0L,
-            now = now,
-        )
-    }
-
-    /** The same mtime-then-hash probe [configChangedSince] uses. */
-    fun appChangedSince(cached: AppConfig): AppConfig? {
-        val meta = files.metadata(AppConfig.PATH)
-        if (meta == null) {
-            return if (cached.present) AppConfig(present = false, lastReadAt = System.currentTimeMillis()) else null
-        }
+    private fun <T : Probed> probe(settings: Settings<T>, cached: T): T? {
+        val now = System.currentTimeMillis()
+        val meta = files.metadata(settings.path)
+        // The file was deleted since we cached it.
+        if (meta == null) return if (cached.present) settings.absent(now) else null
         if (cached.present && meta.lastModified == cached.lastModified) return null
-        val fresh = readAppConfig()
+        val fresh = read(settings, now, meta)
         return if (fresh.sha256 == cached.sha256 && cached.present) null else fresh
     }
 
-    /** The same mtime-then-hash probe [configChangedSince] uses. */
-    fun linterChangedSince(cached: LinterConfig): LinterConfig? {
-        val meta = files.metadata(LinterConfig.PATH)
-        if (meta == null) {
-            return if (cached.present) LinterConfig(present = false, lastReadAt = System.currentTimeMillis()) else null
-        }
-        if (cached.present && meta.lastModified == cached.lastModified) return null
-        val fresh = readLinter()
-        return if (fresh.sha256 == cached.sha256 && cached.present) null else fresh
-    }
+    /** `.obsidian/daily-notes.json` — where the note goes and what it is called. */
+    fun readConfig(now: Long = System.currentTimeMillis()): VaultConfig = read(DAILY_NOTES, now, null)
+
+    /** The Linter plugin's own settings, which say what gets stamped on a save. */
+    fun readLinter(now: Long = System.currentTimeMillis()): LinterConfig = read(LINTER, now, null)
+
+    /** `.obsidian/app.json`, which says where a deleted note goes. */
+    fun readAppConfig(now: Long = System.currentTimeMillis()): AppConfig = read(APP_SETTINGS, now, null)
+
+    fun configChangedSince(cached: VaultConfig): VaultConfig? = probe(DAILY_NOTES, cached)
+
+    fun linterChangedSince(cached: LinterConfig): LinterConfig? = probe(LINTER, cached)
+
+    fun appChangedSince(cached: AppConfig): AppConfig? = probe(APP_SETTINGS, cached)
 
     // ── Phase 1: open today's note ───────────────────────────────────────────
 
@@ -304,5 +286,21 @@ class VaultRepository(private val files: VaultFiles) {
     private companion object {
         /** Deep enough that a day trashed over and over still finds a free name. */
         const val TRASH_ATTEMPTS = 100
+
+        val DAILY_NOTES = Settings(
+            VaultFiles.CONFIG_PATH,
+            { VaultConfig(present = false, lastReadAt = it) },
+            VaultConfig::parse,
+        )
+        val LINTER = Settings(
+            LinterConfig.PATH,
+            { LinterConfig(present = false, lastReadAt = it) },
+            LinterConfig::parse,
+        )
+        val APP_SETTINGS = Settings(
+            AppConfig.PATH,
+            { AppConfig(present = false, lastReadAt = it) },
+            AppConfig::parse,
+        )
     }
 }

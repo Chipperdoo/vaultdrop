@@ -30,9 +30,14 @@ class WikiIndex(val all: List<IndexEntry>) {
 
     val size: Int get() = all.size
 
-    /** Built once per walk, so a lookup by path is a hash lookup. */
-    val byPath: Map<String, IndexEntry> by lazy(LazyThreadSafetyMode.NONE) {
-        all.associateByTo(HashMap(all.size)) { it.path }
+    /**
+     * Every note's path, so [DayIndex] can test a candidate day in a hash lookup.
+     *
+     * A set rather than the `path -> entry` map this used to be: nothing ever
+     * wanted the entry, so half of every bucket was an address no caller read.
+     */
+    val paths: Set<String> by lazy(LazyThreadSafetyMode.NONE) {
+        all.mapTo(HashSet(all.size), IndexEntry::path)
     }
 
     /** What [nameHits] found: the rows to show, and how many there were in all. */
@@ -109,6 +114,15 @@ class WikiIndex(val all: List<IndexEntry>) {
                 }
             }
         }
+
+        /**
+         * When the cache was last written, or 0 when there is none.
+         *
+         * The launch pass uses this to decide whether the vault is worth walking
+         * again at all — a walk is one cursor per directory, into the same
+         * provider the editor has just finished reading from.
+         */
+        fun savedAt(context: Context): Long = cacheFile(context).lastModified()
 
         fun clear(context: Context) {
             runCatching { cacheFile(context).delete() }

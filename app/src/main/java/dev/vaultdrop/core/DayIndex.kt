@@ -43,10 +43,6 @@ class DayIndex(val days: List<LocalDate>) {
         return DayIndex(out)
     }
 
-    fun plus(date: LocalDate): DayIndex = with(mapOf(date to true))
-
-    fun minus(date: LocalDate): DayIndex = with(mapOf(date to false))
-
     private fun indexOf(date: LocalDate): Int {
         val at = insertionPoint(date)
         return if (at < days.size && days[at] == date) at else -1
@@ -76,9 +72,10 @@ class DayIndex(val days: List<LocalDate>) {
          * available: [MomentFormat] emits Moment's ordinals (`Do`, `Mo`) as
          * literals, and a format carrying no year has no inverse at all.
          *
-         * The cost is one cached-formatter call and one hash lookup per candidate
-         * day, so a ten-year span is a few milliseconds — cheap enough to run on
-         * the same background pass that builds the index it reads.
+         * The cost is one cached-formatter call, one path built through a reused
+         * builder and one hash lookup per candidate day, so a ten-year span is a
+         * few milliseconds — cheap enough to run on the same background pass that
+         * builds the index it reads.
          */
         fun build(
             config: VaultConfig,
@@ -87,10 +84,13 @@ class DayIndex(val days: List<LocalDate>) {
             span: Int,
         ): DayIndex {
             if (paths.isEmpty()) return EMPTY
+            // One layout for the whole span: the folder is split and sanitised
+            // once here rather than once per candidate day.
+            val layout = DailyLayout(config)
             val out = ArrayList<LocalDate>()
             for (back in span - 1 downTo 0) {
                 val date = today.minusDays(back.toLong())
-                if (DailyNote.resolve(config, date).relativePath in paths) out.add(date)
+                if (layout.relativePath(date) in paths) out.add(date)
             }
             return DayIndex(out)
         }

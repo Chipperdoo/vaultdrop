@@ -70,9 +70,6 @@ class ConfigStore(context: Context) {
         prefs.edit { this.clear() }
     }
 
-    /** True on the very first launch, and after the vault grant is revoked. */
-    val isConfigured: Boolean get() = vaultUri != null && loadConfig() != null
-
     private companion object {
         const val NAME = "vaultdrop"
         const val KEY_VAULT = "vault_uri"

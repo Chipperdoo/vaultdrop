@@ -11,7 +11,6 @@ import dev.vaultdrop.ui.theme.Ui
 /** The design's type scale, transcribed. Colour is applied at the call site. */
 object T {
     val date = TextStyle(fontFamily = Mono, fontSize = 16.sp, letterSpacing = (-0.01).em)
-    val dateLarge = TextStyle(fontFamily = Mono, fontSize = 17.sp, letterSpacing = (-0.01).em)
     val newTag = TextStyle(fontFamily = Mono, fontSize = 10.sp)
     val chipText = TextStyle(fontFamily = Mono, fontSize = 11.sp, letterSpacing = 0.02.em)
     val fmBody = TextStyle(fontFamily = Mono, fontSize = 12.5.sp, lineHeight = 20.6.sp)
@@ -68,5 +67,4 @@ object T {
     /** Every tap target in the chrome is the same 44dp circle. */
     val touch = 44.dp
     val barHeight = 56.dp
-    val gutter = 16.dp
 }

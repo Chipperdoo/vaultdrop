@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -39,7 +40,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.LaunchedEffect
@@ -57,7 +57,7 @@ import kotlin.math.min
 @Composable
 fun EditorScreen(
     state: UiState,
-    onBodyChange: (TextFieldValue) -> Unit,
+    body: TextFieldState,
     onToggleFrontmatter: () -> Unit,
     onOpenDays: () -> Unit,
     onCloseDays: () -> Unit,
@@ -126,9 +126,13 @@ fun EditorScreen(
             }
 
             if (state.frontmatter.isNotBlank()) {
+                // Remembered against the fence itself: counting its lines meant
+                // a trimmed copy and a list of every line in it, and this used
+                // to be recomposed by every keystroke in the note below.
+                val fmLines = remember(state.frontmatter) { state.frontmatter.trim().lines().size }
                 FrontmatterChip(
                     open = state.fmOpen,
-                    lineCount = state.frontmatter.trim().lines().size,
+                    lineCount = fmLines,
                     onToggle = onToggleFrontmatter,
                 )
                 if (state.fmOpen) {
@@ -169,9 +173,11 @@ fun EditorScreen(
                         alpha = 1f - min(abs(drag.value) / 500f, 0.4f)
                     },
             ) {
+                // State-backed: an edit goes straight into the field's own
+                // buffer instead of round-tripping a whole new UiState through
+                // the view model and invalidating this screen for it.
                 BasicTextField(
-                    value = state.body,
-                    onValueChange = onBodyChange,
+                    state = body,
                     textStyle = T.note.copy(color = c.onSurface.copy(alpha = 0.92f)),
                     cursorBrush = SolidColor(c.primary),
                     modifier = Modifier

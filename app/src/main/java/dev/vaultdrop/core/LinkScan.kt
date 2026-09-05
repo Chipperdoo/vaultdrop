@@ -6,11 +6,15 @@ package dev.vaultdrop.core
  * Indices only, never substrings of the note: this runs on the main thread on
  * every keystroke, so the cost of typing must not grow with the length of the
  * note. Only the query itself — a few characters — is ever copied.
+ *
+ * [CharSequence] rather than [String], so the text field's own buffer can be
+ * read where it lies. Asking it for a `String` first would copy the whole note
+ * per keystroke, which is the cost this file exists to avoid.
  */
 object LinkScan {
 
     /** @return the index of the unclosed `[[` before [caret], or -1 if there is none. */
-    fun openBracketBefore(text: String, caret: Int): Int {
+    fun openBracketBefore(text: CharSequence, caret: Int): Int {
         val at = caret.coerceIn(0, text.length)
         // Both brackets have to be behind the caret to count.
         if (at < 2) return -1
@@ -21,7 +25,7 @@ object LinkScan {
     }
 
     /** @return what has been typed since that `[[`, or null when the caret is not in one. */
-    fun queryAt(text: String, caret: Int): String? {
+    fun queryAt(text: CharSequence, caret: Int): String? {
         val cut = openBracketBefore(text, caret)
         if (cut == -1) return null
         return text.substring(cut + 2, caret.coerceIn(0, text.length))
