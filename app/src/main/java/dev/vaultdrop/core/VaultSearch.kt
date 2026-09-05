@@ -1,13 +1,13 @@
 package dev.vaultdrop.core
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
  * One result row. [snippet] is null for a name match, which has no note text
@@ -40,6 +40,10 @@ class VaultSearch(private val files: VaultFiles) {
      * Hits are stored **by position**, so the name-sorted order [index] arrived in
      * survives reads finishing out of order. Cancellation is checked once per
      * chunk and again on every permit, so a keystroke stops the scan promptly.
+     *
+     * Nothing here allocates per note beyond the note's own text: the read
+     * buffers are handed round between the permits, and the query is matched
+     * against the text as read rather than against a folded copy of it.
      */
     suspend fun run(
         index: WikiIndex,
@@ -53,33 +57,47 @@ class VaultSearch(private val files: VaultFiles) {
 
         val found = arrayOfNulls<SearchHit>(entries.size)
         val gate = Semaphore(CONCURRENCY)
+        // At most [CONCURRENCY] reads are ever in flight, so at most that many
+        // buffers are ever live. A vault of a thousand notes used to leave a
+        // thousand 64 KB arrays behind for the collector to deal with, in the
+        // middle of the one operation in the app that reads the whole vault.
+        val buffers = ConcurrentLinkedQueue<ByteArray>()
         var scanned = 0
         var hits = 0
 
-        for (chunk in entries.indices.chunked(PROGRESS_EVERY)) {
+        var from = 0
+        while (from < entries.size) {
             currentCoroutineContext().ensureActive()
+            val to = minOf(from + PROGRESS_EVERY, entries.size)
             coroutineScope {
-                chunk.map { at ->
-                    async(Dispatchers.IO) {
+                for (at in from until to) {
+                    launch(Dispatchers.IO) {
                         gate.withPermit {
                             val entry = entries[at]
-                            val text = files.readHead(files.uriFor(entry.path), MAX_NOTE_BYTES)
-                                ?: return@withPermit
-                            val cut = text.foldCase().indexOf(q)
-                            if (cut != -1) {
-                                found[at] = SearchHit(entry, Snippet.around(text, cut, q.length))
+                            val buffer = buffers.poll() ?: ByteArray(MAX_NOTE_BYTES)
+                            val text = try {
+                                files.readHead(files.uriFor(entry.path), buffer)
+                            } finally {
+                                buffers.offer(buffer)
+                            }
+                            if (text != null) {
+                                val cut = indexOfFolded(text, q)
+                                if (cut != -1) {
+                                    found[at] = SearchHit(entry, Snippet.around(text, cut, q.length))
+                                }
                             }
                         }
                     }
-                }.awaitAll()
+                }
             }
-            scanned += chunk.size
-            for (at in chunk) if (found[at] != null) hits++
+            scanned = to
+            for (at in from until to) if (found[at] != null) hits++
             val collected = collect(found, limit)
             // Stopping at the limit is what keeps a common word from costing the
             // whole vault; the caller says "40+" rather than pretending it counted.
             if (hits >= limit) return Result(collected, scanned, capped = true)
             onProgress(scanned, collected)
+            from = to
         }
         return Result(collect(found, limit), scanned, capped = false)
     }
@@ -110,6 +128,33 @@ class VaultSearch(private val files: VaultFiles) {
 
         const val LIMIT = 40
     }
+}
+
+/**
+ * The first offset in [text] holding [needle], comparing case-insensitively.
+ *
+ * [needle] arrives already folded, and [text] is folded a character at a time as
+ * it is read. Folding the note instead — `text.foldCase().indexOf(q)`, which
+ * this replaces — meant a second full copy of every note the scan opened, up to
+ * 64 KB apiece across the whole vault, to find something usually not in it.
+ *
+ * `foldCase` is char-for-char, so the offset returned is an offset into [text]
+ * itself and a snippet window cut at it lands on the right text.
+ */
+internal fun indexOfFolded(text: String, needle: String): Int {
+    if (needle.isEmpty()) return 0
+    val last = text.length - needle.length
+    var at = 0
+    outer@ while (at <= last) {
+        for (i in needle.indices) {
+            if (text[at + i].lowercaseChar() != needle[i]) {
+                at++
+                continue@outer
+            }
+        }
+        return at
+    }
+    return -1
 }
 
 /** The window of note text a result row quotes. Pure, so it is testable without SAF. */

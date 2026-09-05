@@ -182,15 +182,19 @@ class VaultFiles(context: Context, val treeUri: Uri) {
     }
 
     /**
-     * Reads at most [limit] bytes off the front of a document.
+     * Reads at most `buffer.size` bytes off the front of a document.
      *
      * [VaultSearch] reads the vault a note at a time and only ever wants enough of
      * each to search, so pulling a whole 40 KB file across the binder to look at
      * the first part of it is exactly the cost this avoids.
+     *
+     * The buffer belongs to the caller. A scan reads every note in the vault and
+     * only ever has a handful of reads in flight, so it hands the same few
+     * buffers round rather than leaving one per note behind for the collector.
      */
-    fun readHead(uri: Uri, limit: Int): String? = try {
+    fun readHead(uri: Uri, buffer: ByteArray): String? = try {
         resolver.openInputStream(uri)?.use { stream ->
-            val buffer = ByteArray(limit)
+            val limit = buffer.size
             var filled = 0
             while (filled < limit) {
                 val read = stream.read(buffer, filled, limit - filled)

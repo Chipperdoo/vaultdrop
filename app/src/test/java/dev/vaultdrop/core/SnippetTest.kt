@@ -71,3 +71,49 @@ class SnippetTest {
         assertTrue(window, window.contains("NEEDLES"))
     }
 }
+
+/**
+ * The scan's matcher. It replaced `text.foldCase().indexOf(q)`, so what has to
+ * hold is that it agrees with that expression on every input — including the
+ * offset, which a snippet window is cut at.
+ */
+class IndexOfFoldedTest {
+
+    private fun assertAgrees(text: String, query: String) {
+        val needle = query.foldCase()
+        assertEquals(
+            "text=$text query=$query",
+            text.foldCase().indexOf(needle),
+            indexOfFolded(text, needle),
+        )
+    }
+
+    @Test
+    fun `it agrees with folding the whole text first`() {
+        val texts = listOf(
+            "", "needle", "a needle here", "NEEDLE", "the Needle and the needle",
+            "nee", "nneedle", "needlneedle", "İstanbul", "ǅungla", "Ω omega",
+        )
+        val queries = listOf("needle", "NEEDLE", "Needle", "n", "e", "", "nope", "İstanbul", "Ω")
+        for (text in texts) for (query in queries) assertAgrees(text, query)
+    }
+
+    @Test
+    fun `a needle longer than the text is not found`() {
+        assertEquals(-1, indexOfFolded("no", "needle"))
+    }
+
+    @Test
+    fun `the offset lands on the original text, not a folded copy`() {
+        val text = "Bought NEEDLES at the shop"
+        val at = indexOfFolded(text, "needles")
+        assertEquals(7, at)
+        assertEquals("NEEDLES", text.substring(at, at + 7))
+    }
+
+    /** A near miss must not stop the scan short of a real hit further on. */
+    @Test
+    fun `a partial match keeps looking`() {
+        assertEquals(9, indexOfFolded("needneed needle", "needle"))
+    }
+}
