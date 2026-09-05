@@ -128,8 +128,11 @@ fun EditorScreen(
             if (state.frontmatter.isNotBlank()) {
                 // Remembered against the fence itself: counting its lines meant
                 // a trimmed copy and a list of every line in it, and this used
-                // to be recomposed by every keystroke in the note below.
-                val fmLines = remember(state.frontmatter) { state.frontmatter.trim().lines().size }
+                // to be recomposed by every keystroke in the note below. The
+                // trim is the same one the body below is drawn from, so it is
+                // held rather than taken twice.
+                val fmText = remember(state.frontmatter) { state.frontmatter.trim() }
+                val fmLines = remember(fmText) { fmText.lines().size }
                 FrontmatterChip(
                     open = state.fmOpen,
                     lineCount = fmLines,
@@ -137,7 +140,7 @@ fun EditorScreen(
                 )
                 if (state.fmOpen) {
                     Text(
-                        state.frontmatter.trim(),
+                        fmText,
                         style = T.fmBody,
                         color = c.onSurfaceVariant.copy(alpha = 0.92f),
                         modifier = Modifier
