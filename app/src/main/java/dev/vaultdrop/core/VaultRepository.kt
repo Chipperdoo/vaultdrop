@@ -28,9 +28,7 @@ interface Probed {
 }
 
 /** Everything the vault can be asked for. Phase 1 uses only [openNote]. */
-class VaultRepository(private val files: VaultFiles) {
-
-    val treeUri: Uri get() = files.treeUri
+class VaultRepository(val files: VaultFiles) {
 
     // ── Validation and config ────────────────────────────────────────────────
 

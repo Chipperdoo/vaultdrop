@@ -160,7 +160,13 @@ fun NoticeBar(text: String, onDismiss: () -> Unit, modifier: Modifier = Modifier
     }
 }
 
-/** Tapping the date opens this. Existence is resolved when the sheet opens. */
+/**
+ * Tapping the date opens this.
+ *
+ * The rows arrive already drawn from the day index and correct themselves as the
+ * view model's probes land — newest day first — so a dot can change under you.
+ * A row that has not been answered for yet says so rather than guessing.
+ */
 @Composable
 fun DaySheet(days: List<DayRow>, onPick: (DayRow) -> Unit, onDismiss: () -> Unit) {
     val c = MaterialTheme.colorScheme
@@ -206,20 +212,22 @@ fun DaySheet(days: List<DayRow>, onPick: (DayRow) -> Unit, onDismiss: () -> Unit
                         .padding(horizontal = 20.dp, vertical = 9.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // Three states, because the sheet is now the only way to make
-                    // a note: filled for the day you are on, filled-muted for a day
-                    // that has one, a ring for a day tapping would create.
+                    // Four states, because the sheet is the only way to make a
+                    // note: filled for the day you are on, filled-muted for a day
+                    // that has one, a ring for a day tapping would create — and a
+                    // faint ring for a day nobody can answer for yet, which is a
+                    // day whose probe is still out.
                     Box(
                         Modifier
                             .size(8.dp)
                             .clip(CircleShape)
                             .then(
-                                if (day.isCurrent || day.exists) {
-                                    Modifier.background(
-                                        if (day.isCurrent) c.primary else c.onSurface.copy(alpha = 0.28f),
-                                    )
-                                } else {
-                                    Modifier.border(1.dp, c.outline, CircleShape)
+                                when {
+                                    day.isCurrent -> Modifier.background(c.primary)
+                                    day.exists == true ->
+                                        Modifier.background(c.onSurface.copy(alpha = 0.28f))
+                                    day.exists == false -> Modifier.border(1.dp, c.outline, CircleShape)
+                                    else -> Modifier.border(1.dp, c.outline.copy(alpha = 0.3f), CircleShape)
                                 },
                             ),
                     )

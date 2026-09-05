@@ -9,11 +9,10 @@ class WikiIndexTest {
         WikiIndex(names.map { IndexEntry(name = it, path = "Daily/$it.md") })
 
     @Test
-    fun `byPath addresses every entry`() {
+    fun `paths holds every entry, and only those`() {
         val index = index("a", "b")
-        assertEquals(2, index.byPath.size)
-        assertEquals("b", index.byPath["Daily/b.md"]?.name)
-        assertEquals(null, index.byPath["missing.md"])
+        assertEquals(2, index.paths.size)
+        assertEquals(setOf("Daily/a.md", "Daily/b.md"), index.paths)
     }
 
     /** The `[[` picker wants what you were most likely typing towards first. */
