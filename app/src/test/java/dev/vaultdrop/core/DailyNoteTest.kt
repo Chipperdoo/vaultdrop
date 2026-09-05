@@ -44,6 +44,44 @@ class DailyNoteTest {
         assertEquals("2026-09-02 Wed.md", DailyNote.resolve(config, date).fileName)
     }
 
+    /**
+     * [DayIndex] tests for [DailyLayout.relativePath] and notes are written to
+     * [DailyNote.resolve]. If those two ever disagreed the day index would offer
+     * steps onto days whose notes are somewhere else, so pin them together over
+     * every shape of format and folder the app has to handle.
+     */
+    @Test
+    fun `the cheap path and the resolved path are the same path`() {
+        val formats = listOf(
+            "YYYY-MM-DD", "YYYY/MM/DD", "YYYY-MM-DD ddd", "YYYY-MM-DD HH:mm",
+            "[Daily] YYYY-MM-DD", "Do MMM", "", "/DD/", "YYYY//MM", " YYYY-MM-DD ",
+        )
+        val folders = listOf("", "Daily", "a/b/c", "/Journal/", "Da:ily")
+        for (format in formats) {
+            for (folder in folders) {
+                val config = VaultConfig(format = format, folder = folder)
+                val layout = DailyLayout(config)
+                for (back in 0 until 40) {
+                    val day = date.minusDays(back.toLong())
+                    assertEquals(
+                        "format=$format folder=$folder day=$day",
+                        DailyNote.resolve(config, day).relativePath,
+                        layout.relativePath(day),
+                    )
+                }
+            }
+        }
+    }
+
+    /** The builder is reused across calls, so a stale tail would show up here. */
+    @Test
+    fun `a reused layout does not leak one day into the next`() {
+        val layout = DailyLayout(VaultConfig(format = "YYYY-M-D", folder = "Daily"))
+        assertEquals("Daily/2026-9-2.md", layout.relativePath(date))
+        assertEquals("Daily/2026-12-30.md", layout.relativePath(LocalDate.of(2026, 12, 30)))
+        assertEquals("Daily/2026-9-2.md", layout.relativePath(date))
+    }
+
     // ── Trash naming, as Obsidian names it ───────────────────────────────────
 
     @Test

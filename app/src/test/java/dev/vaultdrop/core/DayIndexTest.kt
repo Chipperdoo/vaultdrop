@@ -74,21 +74,21 @@ class DayIndexTest {
 
     @Test
     fun `a note the walk has not seen yet is reachable once recorded`() {
-        val days = index("2026-09-03.md").plus(LocalDate.of(2026, 9, 1))
+        val days = index("2026-09-03.md").with(mapOf(LocalDate.of(2026, 9, 1) to true))
         assertTrue(days.contains(LocalDate.of(2026, 9, 1)))
         assertEquals(LocalDate.of(2026, 9, 1), days.before(today))
     }
 
     @Test
     fun `a note deleted under the walk drops back out`() {
-        val days = index("2026-09-03.md", "2026-09-01.md").minus(LocalDate.of(2026, 9, 1))
+        val days = index("2026-09-03.md", "2026-09-01.md").with(mapOf(LocalDate.of(2026, 9, 1) to false))
         assertFalse(days.contains(LocalDate.of(2026, 9, 1)))
         assertNull(days.before(today))
     }
 
     @Test
     fun `adding a day already present changes nothing`() {
-        val days = index("2026-09-03.md").plus(today)
+        val days = index("2026-09-03.md").with(mapOf(today to true))
         assertEquals(listOf(today), days.days)
     }
 
