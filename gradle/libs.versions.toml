@@ -1,6 +1,6 @@
 [versions]
-agp = "8.7.3"
-kotlin = "2.1.0"
+agp = "9.4.0"
+kotlin = "2.4.10"
 coreKtx = "1.15.0"
 lifecycle = "2.8.7"
 activityCompose = "1.9.3"
@@ -28,5 +28,4 @@ json = { group = "org.json", name = "json", version.ref = "json" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
