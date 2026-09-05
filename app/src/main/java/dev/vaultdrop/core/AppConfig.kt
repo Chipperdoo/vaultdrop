@@ -39,12 +39,11 @@ enum class TrashOption(val key: String) {
  */
 data class AppConfig(
     val trash: TrashOption = TrashOption.DEFAULT,
-    /** False when the file was absent and these are pure defaults. */
-    val present: Boolean = false,
-    val sha256: String = "",
-    val lastModified: Long = 0L,
+    override val present: Boolean = false,
+    override val sha256: String = "",
+    override val lastModified: Long = 0L,
     val lastReadAt: Long = 0L,
-) {
+) : Probed {
     fun toJson(): String = JSONObject().apply {
         put(KEY_TRASH, trash.key)
         put(KEY_PRESENT, present)

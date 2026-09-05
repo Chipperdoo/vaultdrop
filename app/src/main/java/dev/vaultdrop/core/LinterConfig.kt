@@ -33,12 +33,11 @@ data class LinterConfig(
     val ignoredFolders: List<String> = emptyList(),
     /** `filesToIgnore`, as the plugin's regexes against the vault-relative path. */
     val ignoredFiles: List<Regex> = emptyList(),
-    /** False when the plugin is not installed and these are pure defaults. */
-    val present: Boolean = false,
-    val sha256: String = "",
-    val lastModified: Long = 0L,
+    override val present: Boolean = false,
+    override val sha256: String = "",
+    override val lastModified: Long = 0L,
     val lastReadAt: Long = 0L,
-) {
+) : Probed {
 
     /** True when the rule would stamp a note at [relativePath]. */
     fun appliesTo(relativePath: String): Boolean =

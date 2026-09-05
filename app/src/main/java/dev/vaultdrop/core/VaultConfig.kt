@@ -10,12 +10,11 @@ data class VaultConfig(
     val format: String = DEFAULT_FORMAT,
     val folder: String = DEFAULT_FOLDER,
     val template: String = DEFAULT_TEMPLATE,
-    /** False when the config file was absent and these are pure defaults. */
-    val present: Boolean = true,
-    val sha256: String = "",
-    val lastModified: Long = 0L,
+    override val present: Boolean = true,
+    override val sha256: String = "",
+    override val lastModified: Long = 0L,
     val lastReadAt: Long = 0L,
-) {
+) : Probed {
     fun toJson(): String = JSONObject().apply {
         put(KEY_FORMAT, format)
         put(KEY_FOLDER, folder)
