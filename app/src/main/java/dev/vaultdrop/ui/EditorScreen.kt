@@ -4,6 +4,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,9 +18,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -39,6 +42,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -125,28 +129,13 @@ fun EditorScreen(
                 Spacer(Modifier.height(20.dp))
             }
 
-            if (state.frontmatter.isNotBlank()) {
-                FrontmatterChip(
-                    open = state.fmOpen,
-                    lineCount = state.frontmatter.trim().lines().size,
-                    onToggle = onToggleFrontmatter,
-                )
-                if (state.fmOpen) {
-                    Text(
-                        state.frontmatter.trim(),
-                        style = T.fmBody,
-                        color = c.onSurfaceVariant.copy(alpha = 0.92f),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 16.dp, end = 16.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(c.surfaceContainer)
-                            .padding(horizontal = 13.dp, vertical = 11.dp),
-                    )
-                    Spacer(Modifier.height(10.dp))
-                }
-            }
-
+            // Frontmatter and the note body share one scroll: the chip is the top of
+            // that stack, not a fixed header, so it scrolls away like everything else.
+            // The field sizes to its own content (no imposed min height) — giving it
+            // a computed floor fought with BasicTextField's own "keep the cursor in
+            // view" scrolling and clipped the note's opening lines when a day loads
+            // with the caret at the end. A plain tap-to-focus on the column covers
+            // the empty space below a short note instead.
             Box(
                 Modifier
                     .weight(1f)
@@ -169,16 +158,52 @@ fun EditorScreen(
                         alpha = 1f - min(abs(drag.value) / 500f, 0.4f)
                     },
             ) {
-                BasicTextField(
-                    value = state.body,
-                    onValueChange = onBodyChange,
-                    textStyle = T.note.copy(color = c.onSurface.copy(alpha = 0.92f)),
-                    cursorBrush = SolidColor(c.primary),
-                    modifier = Modifier
+                Column(
+                    Modifier
                         .fillMaxSize()
-                        .focusRequester(focus)
-                        .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 20.dp),
-                )
+                        .verticalScroll(rememberScrollState())
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = {
+                                focus.requestFocus()
+                                onBodyChange(state.body.copy(selection = TextRange(state.body.text.length)))
+                            },
+                        ),
+                ) {
+                    if (state.frontmatter.isNotBlank()) {
+                        FrontmatterChip(
+                            open = state.fmOpen,
+                            lineCount = state.frontmatter.trim().lines().size,
+                            onToggle = onToggleFrontmatter,
+                        )
+                        if (state.fmOpen) {
+                            Text(
+                                state.frontmatter.trim(),
+                                style = T.fmBody,
+                                color = c.onSurfaceVariant.copy(alpha = 0.92f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 16.dp, end = 16.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(c.surfaceContainer)
+                                    .padding(horizontal = 13.dp, vertical = 11.dp),
+                            )
+                            Spacer(Modifier.height(10.dp))
+                        }
+                    }
+
+                    BasicTextField(
+                        value = state.body,
+                        onValueChange = onBodyChange,
+                        textStyle = T.note.copy(color = c.onSurface.copy(alpha = 0.92f)),
+                        cursorBrush = SolidColor(c.primary),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(focus)
+                            .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 20.dp),
+                    )
+                }
             }
 
             if (state.linkOpen) {
@@ -213,8 +238,8 @@ fun EditorScreen(
                 Modifier
                     .align(Alignment.TopCenter)
                     .statusBarsPadding()
-                    // Clear of the frontmatter chip: the bar, the 30dp chip, its gap.
-                    .padding(top = 94.dp)
+                    // Clear of the frontmatter chip: the bar, its top margin, the 30dp chip, its gap.
+                    .padding(top = 104.dp)
                     .clip(RoundedCornerShape(24.dp))
                     .background(c.primary)
                     .padding(horizontal = 19.5.dp, vertical = 10.5.dp),
@@ -429,7 +454,7 @@ private fun FrontmatterChip(open: Boolean, lineCount: Int, onToggle: () -> Unit)
     val c = MaterialTheme.colorScheme
     Row(
         modifier = Modifier
-            .padding(start = 16.dp, end = 16.dp, bottom = 8.dp)
+            .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 8.dp)
             .height(30.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(c.surfaceContainer)
