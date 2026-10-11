@@ -25,6 +25,7 @@ import dev.vaultdrop.core.LinkScan
 import dev.vaultdrop.core.NotePath
 import dev.vaultdrop.core.OpenNote
 import dev.vaultdrop.core.SearchHit
+import dev.vaultdrop.core.Sharing
 import dev.vaultdrop.core.TrashOption
 import dev.vaultdrop.core.VaultConfig
 import dev.vaultdrop.core.VaultFiles
@@ -417,6 +418,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun onVerifyContinue() {
         if (!state.verifyReady) return
         state = state.copy(screen = Screen.Editor)
+        deliverShares()
     }
 
     // ── Phase 2 ──────────────────────────────────────────────────────────────
@@ -685,6 +687,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             rollOverPending = false
             rollOver()
         }
+        deliverShares()
     }
 
     /** Whether [pin]'s note is still the one on screen. Check before splicing anything in. */
@@ -804,6 +807,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         openDate = date
         anchoredTo = LocalDate.now()
         body.clearText()
+        shareOpensGap = false
         state = state.copy(
             dateLabel = DailyNote.label(activeConfig, date),
             notePath = "",
@@ -861,7 +865,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         anchoredTo = LocalDate.now()
 
         val typed = if (fromCreate) body.text.toString() else ""
-        body.setTextAndPlaceCursorAtEnd(if (typed.isEmpty()) opened.body else opened.body + typed)
+        // A share put into the gap goes after a blank line, like any share.
+        val gap = if (shareOpensGap) Sharing.separator(opened.body) else ""
+        shareOpensGap = false
+        body.setTextAndPlaceCursorAtEnd(if (typed.isEmpty()) opened.body else opened.body + gap + typed)
 
         state = state.copy(
             dateLabel = DailyNote.label(activeConfig, date),
@@ -1376,6 +1383,177 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
     }
+
+    // ── Sharing ──────────────────────────────────────────────────────────────
+
+    /**
+     * Shares the editor cannot take yet: one that came before a vault was
+     * picked, or while a capture held the note. Delivered in the order they came
+     * by [onVerifyContinue] and the last [unpin].
+     */
+    private val waitingShares = ArrayDeque<Share>()
+
+    /** Shared files whose share has been delivered, waiting for [attachSharedFiles]. */
+    private val pendingFiles = mutableListOf<SharedFile>()
+
+    /**
+     * The note on screen is still being created, and a share was the first
+     * thing put into it. [adopt] then puts a blank line between the template and
+     * the share, as every other share gets. Text typed into that gap still joins
+     * the template directly.
+     */
+    private var shareOpensGap = false
+
+    /** [leads] marks the first file of a share with no text, which starts at the end of the note. */
+    private data class SharedFile(val uri: Uri, val type: String?, val leads: Boolean)
+
+    private class Landed(val embed: String, val audio: Boolean)
+
+    /**
+     * Another app shared something into VaultDrop: at launch, straight after
+     * [phase1], or into the running app from `onNewIntent`.
+     *
+     * It goes into today's note, at the end after a blank line, with the caret
+     * after it so a line of context can follow. Text goes in at once, so at
+     * launch it is in the first frame. Into a note still being created it goes
+     * into the field like typing, and [adopt] puts it after the template. Files
+     * are read from the sender once the editor is up; see [attachSharedFiles].
+     *
+     * A share that comes before a vault is picked waits through the picker and
+     * the verify screen, files included: the picker is another activity on top
+     * of this one, so the sender's grant is still good when the editor opens.
+     */
+    fun receiveShare(share: Share) {
+        waitingShares.addLast(share)
+        deliverShares()
+    }
+
+    /** Hands over every waiting share the editor can take now, oldest first. */
+    private fun deliverShares() {
+        while (waitingShares.isNotEmpty() && repo != null && state.screen == Screen.Editor && !state.captureInFlight) {
+            deliver(waitingShares.removeFirst())
+        }
+    }
+
+    /** Moves to today the way [goToDate] does, creating the note if it is missing, then puts [share] in. */
+    private fun deliver(share: Share) {
+        if (state.searchOpen) closeSearch()
+        state = state.copy(daysOpen = false, deleteOpen = false, reindexOpen = false)
+        val today = LocalDate.now()
+        if (openDate != today) {
+            saveNow()
+            openDay(today, create = true, showCreatedNotice = true)
+        }
+        share.text?.let { appendShared(it, block = false) }
+        share.files.forEachIndexed { i, uri ->
+            pendingFiles += SharedFile(uri, share.type, leads = i == 0 && share.text == null)
+        }
+        // phase2Started turns true with the editor's first frame. Until then the
+        // activity makes this call, from the effect that starts Phase 2.
+        if (phase2Started) attachSharedFiles()
+    }
+
+    /**
+     * [insert] at the end of the note, after a blank line, with the caret after
+     * it; see [Sharing.append]. Through the field's buffer, like [insertAtCaret].
+     */
+    private fun appendShared(insert: String, block: Boolean) {
+        if (note == null && body.text.isEmpty()) shareOpensGap = true
+        val edit = Sharing.append(body.text, insert, block)
+        body.edit {
+            replace(edit.start, edit.end, edit.text)
+            selection = TextRange(edit.caret)
+        }
+    }
+
+    /**
+     * Copies the shared files waiting in [pendingFiles] into the vault and
+     * embeds them, holding one [pin] for the lot.
+     *
+     * The activity calls this once the editor is up, next to [startPhase2], and
+     * [deliver] calls it after that. Asking the sender's provider for a name or
+     * a stream is a round trip into another app, so none of it happens before
+     * the first frame. The sender's grant only lasts as long as the activity,
+     * so it starts as soon as that frame is drawn.
+     *
+     * Each embed goes in at the caret, so a photo shared with a caption lands
+     * under the caption, and several land one per line in the order shared. A
+     * file with nothing ahead of it in its share starts at the end of the note
+     * after a blank line instead, as shared text does.
+     */
+    fun attachSharedFiles() {
+        if (pendingFiles.isEmpty()) return
+        val pin = pin() ?: return
+        val batch = pendingFiles.toList()
+        pendingFiles.clear()
+        viewModelScope.launch {
+            try {
+                var failed = 0
+                var leading = false
+                for (file in batch) {
+                    leading = leading || file.leads
+                    val landed = attachShared(pin, file)
+                    // Only Change vault moves the note while a pin is held, and
+                    // then there is no note left to say anything in.
+                    if (!isStillOpen(pin)) return@launch
+                    if (landed == null) {
+                        failed++
+                        continue
+                    }
+                    if (leading) appendShared(landed.embed, block = true) else insertAtCaret(landed.embed, block = true)
+                    leading = false
+                    if (landed.audio) {
+                        val transcript = transcribeShared(file.uri)
+                        if (transcript != null && isStillOpen(pin)) insertAtCaret(transcript, block = true)
+                    }
+                }
+                if (failed > 0) {
+                    state = state.copy(
+                        notice = if (batch.size == 1) {
+                            "Could not copy the shared file into the vault."
+                        } else {
+                            "Could not copy $failed of ${batch.size} shared files into the vault."
+                        },
+                    )
+                }
+            } finally {
+                unpin()
+            }
+        }
+    }
+
+    /**
+     * One shared file, named and copied through [attach]. Its name and type are
+     * the sender's to tell, asked here on IO and never on the launch path.
+     */
+    private suspend fun attachShared(pin: Pin, file: SharedFile): Landed? {
+        val files = repo?.files ?: return null
+        val (name, audio, source) = withContext(Dispatchers.IO) {
+            val about = files.describeShared(file.uri)
+            val mime = about.mimeType ?: file.type
+            Triple(
+                Sharing.fileName(about.displayName, mime, LocalDateTime.now(), VaultFiles::extensionFor),
+                listOfNotNull(about.mimeType, file.type).any { it.startsWith("audio/") },
+                files.openShared(file.uri),
+            )
+        }
+        val embed = source?.use { attach(pin, name.stem, name.ext, it) } ?: return null
+        return Landed(embed, audio)
+    }
+
+    /**
+     * The transcript of a shared recording, to go under its embed, or null to
+     * leave the recording on its own. Always null for now.
+     *
+     * Open Transcribe connects here (docs/plans/multimedia.md, "Audio shared
+     * in"). When an engine has been chosen, open [audio] as a
+     * `ParcelFileDescriptor` on IO, pass it to `transcribe(pfd)` and return the
+     * text, or null on any failure. [audio] is the sender's URI and readable
+     * only while the activity lives, so open it before anything slow. The pin
+     * is held until this returns, so the note cannot move under the transcript.
+     */
+    @Suppress("RedundantSuspendModifier", "UNUSED_PARAMETER")
+    private suspend fun transcribeShared(audio: Uri): String? = null
 
     // ── Coming back ──────────────────────────────────────────────────────────
 
