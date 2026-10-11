@@ -61,6 +61,7 @@ fun VaultDropApp(vm: EditorViewModel) {
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri -> vm.onVaultPicked(uri) }
+    val photos = rememberPhotoCapture(vm)
 
     when {
         state.screen == Screen.FirstRun -> FirstRunScreen(
@@ -107,6 +108,8 @@ fun VaultDropApp(vm: EditorViewModel) {
             onAskDelete = vm::askDelete,
             onConfirmDelete = vm::confirmDelete,
             onCancelDelete = vm::cancelDelete,
+            onTakePhoto = photos::takePhoto,
+            onChoosePhotos = photos::choosePhotos,
         )
     }
 

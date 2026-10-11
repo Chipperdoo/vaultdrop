@@ -1,6 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+        No CAMERA permission. Do not add it. The phone's own camera app takes
+        the photo through ACTION_IMAGE_CAPTURE, and Android refuses that intent
+        with a SecurityException when the app sending it declares CAMERA but
+        has not been granted it.
+    -->
+
+    <queries>
+        <!-- So the camera button can tell whether any camera app is installed. -->
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -21,6 +35,21 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Lends the camera app cache/capture/ to write its photo into, before
+            the copy into the vault. The authority starts with the application
+            ID, so an install under another ID claims its own.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

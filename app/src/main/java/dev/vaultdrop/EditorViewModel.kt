@@ -24,6 +24,7 @@ import dev.vaultdrop.core.LinterConfig
 import dev.vaultdrop.core.LinkScan
 import dev.vaultdrop.core.NotePath
 import dev.vaultdrop.core.OpenNote
+import dev.vaultdrop.core.PhotoNames
 import dev.vaultdrop.core.SearchHit
 import dev.vaultdrop.core.TrashOption
 import dev.vaultdrop.core.VaultConfig
@@ -34,11 +35,13 @@ import dev.vaultdrop.core.WikiIndex
 import dev.vaultdrop.core.splice
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.InputStream
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -725,6 +728,156 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return withContext(Dispatchers.IO) {
             val app = refreshAppConfig(repository)
             repository.attach(pin.note, stem, ext, source, app)?.let { Attachments.embed(it, pin.note, app) }
+        }
+    }
+
+    // ── Photos ───────────────────────────────────────────────────────────────
+
+    /** The camera's cache file and the picker's photos. Not the vault; that is [VaultFiles]. */
+    private val photoFiles = PhotoFiles(app)
+
+    /** A camera capture out in the camera app: the note it belongs to, and the file being written. */
+    private var shot: Pair<Pin, File>? = null
+
+    /** The note a photo pick belongs to, while the picker is open. */
+    private var pickPin: Pin? = null
+
+    /**
+     * Gets the camera ready. Pins the note, then makes room for the file the
+     * camera app will write, and returns the URI to open it with. Null when
+     * there is nothing to pin, or when the camera can't be opened, with a
+     * notice saying why.
+     *
+     * The pin goes on before the camera opens, so the note can't change while
+     * you are in the camera app.
+     */
+    suspend fun startPhoto(): Uri? {
+        if (state.captureInFlight) return null
+        val pin = pin() ?: return null
+        var handedOff = false
+        try {
+            val (camera, target) = withContext(Dispatchers.IO) { photoFiles.hasCameraApp() to photoFiles.newShot() }
+            if (!camera || target == null) {
+                state = state.copy(notice = if (camera) "Could not open the camera." else NO_CAMERA)
+                return null
+            }
+            shot = pin to target.file
+            handedOff = true
+            return target.uri
+        } finally {
+            // Nothing will come back to unpin it: no camera, no file, or the
+            // tap's own coroutine cancelled on the way.
+            if (!handedOff) unpin()
+        }
+    }
+
+    /**
+     * The camera app is back. [saved] is false when it was backed out of.
+     *
+     * The cache file is deleted either way, copied or not. With no capture
+     * waiting, the process died while the camera was open. There is no pin to
+     * land the photo against, and the next [startPhoto] clears the file.
+     */
+    fun onPhotoTaken(saved: Boolean) {
+        val (pin, file) = shot ?: return
+        shot = null
+        viewModelScope.launch {
+            try {
+                if (!saved) return@launch
+                // A camera app can report success and write nothing. Going
+                // through the cache is what keeps that empty file out of the vault.
+                if (withContext(Dispatchers.IO) { file.length() } == 0L) {
+                    if (isStillOpen(pin)) state = state.copy(notice = "The camera app sent back no photo.")
+                    return@launch
+                }
+                val stem = PhotoNames.stamped(LocalDateTime.now())
+                val embed = attachFrom(pin, stem, PhotoNames.CAMERA_EXT) { photoFiles.open(file) }
+                if (!isStillOpen(pin)) return@launch
+                if (embed != null) insertAtCaret(embed, block = true)
+                else state = state.copy(notice = "Could not copy the photo into the vault.")
+            } finally {
+                withContext(NonCancellable + Dispatchers.IO) { file.delete() }
+                unpin()
+            }
+        }
+    }
+
+    /** Pins the note before the photo picker opens. False when there is nothing to pin; don't open it then. */
+    fun startChoosingPhotos(): Boolean {
+        if (state.captureInFlight) return false
+        pickPin = pin() ?: return false
+        return true
+    }
+
+    /**
+     * The picker is back with [uris] in the order they were picked, or with
+     * none when it was backed out of.
+     *
+     * They are copied in one after another straight away, because the picker's
+     * grants are temporary. Each embed goes in on a line of its own as its copy
+     * lands. A format Obsidian doesn't draw is copied all the same, and the
+     * notice says so.
+     */
+    fun onPhotosChosen(uris: List<Uri>) {
+        val pin = pickPin ?: return
+        pickPin = null
+        viewModelScope.launch {
+            try {
+                var failed = 0
+                val undrawn = sortedSetOf<String>()
+                for (uri in uris) {
+                    val name = withContext(Dispatchers.IO) { photoFiles.nameOf(uri, LocalDateTime.now()) }
+                    val embed = attachFrom(pin, name.stem, name.ext) { photoFiles.open(uri) }
+                    if (!isStillOpen(pin)) return@launch
+                    if (embed == null) {
+                        failed++
+                        continue
+                    }
+                    insertAtCaret(embed, block = true)
+                    if (!PhotoNames.rendersInObsidian(name.ext)) undrawn += name.ext.lowercase(Locale.ROOT)
+                }
+                photosNotice(failed, uris.size, undrawn)?.let { state = state.copy(notice = it) }
+            } finally {
+                unpin()
+            }
+        }
+    }
+
+    /** Nothing on the phone opened for the camera or the picker, so the pin taken for it comes off. */
+    fun onPhotoAppMissing() {
+        val camera = shot != null
+        if (!camera && pickPin == null) return
+        shot = null
+        pickPin = null
+        unpin()
+        state = state.copy(notice = if (camera) NO_CAMERA else "No photo picker on this phone.")
+    }
+
+    /**
+     * [attach] for a source this opens and closes itself, both on IO. Closing
+     * a provider's stream releases the provider, which can be a binder call,
+     * so that stays off the main thread too.
+     */
+    private suspend fun attachFrom(pin: Pin, stem: String, ext: String, open: () -> InputStream?): String? {
+        val source = withContext(Dispatchers.IO) { open() } ?: return null
+        try {
+            return attach(pin, stem, ext, source)
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) { runCatching { source.close() } }
+        }
+    }
+
+    /** What a pick has to report: photos that didn't copy, and formats Obsidian won't draw. Null for neither. */
+    private fun photosNotice(failed: Int, total: Int, undrawn: Set<String>): String? {
+        val formats = undrawn.joinToString(" or ") { if (it.isEmpty()) "files with no extension" else ".$it files" }
+        return when {
+            failed > 0 -> buildString {
+                append(if (total == 1) "Could not copy the photo" else "Could not copy $failed of $total photos")
+                append(" into the vault.")
+                if (undrawn.isNotEmpty()) append(" Obsidian does not display $formats.")
+            }
+            undrawn.isNotEmpty() -> "Copied, but Obsidian does not display $formats."
+            else -> null
         }
     }
 
@@ -1429,6 +1582,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val WALKING = "Already walking the vault — this one will finish on its own."
+        const val NO_CAMERA = "No camera app is installed."
 
         /** Long enough that pausing to read a link or answer a message is not a rescan. */
         const val RESUME_REINDEX_AFTER_MS = 3 * 60 * 1000L

@@ -79,6 +79,8 @@ fun EditorScreen(
     onAskDelete: () -> Unit,
     onConfirmDelete: () -> Unit,
     onCancelDelete: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onChoosePhotos: () -> Unit,
 ) {
     val c = MaterialTheme.colorScheme
     val drag = remember { Animatable(0f) }
@@ -225,6 +227,13 @@ fun EditorScreen(
                     matches = state.linkMatches,
                     onPick = onPickLink,
                 )
+            } else {
+                CaptureRow {
+                    // Off while any capture holds the note, this one included.
+                    val ready = !state.captureInFlight
+                    CaptureButton("Take a photo", ready, onTakePhoto) { CameraGlyph(barInk(ready)) }
+                    CaptureButton("Choose photos", ready, onChoosePhotos) { GalleryGlyph(barInk(ready)) }
+                }
             }
         }
 
