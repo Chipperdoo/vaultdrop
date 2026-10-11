@@ -47,6 +47,7 @@ import dev.vaultdrop.core.dictationText
 import dev.vaultdrop.core.splice
 import dev.vaultdrop.voice.Dictation
 import dev.vaultdrop.voice.findVoiceOptions
+import dev.vaultdrop.voice.transcribeFile
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -1894,7 +1895,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** [leads] marks the first file of a share with no text, which starts at the end of the note. */
     private data class SharedFile(val uri: Uri, val type: String?, val leads: Boolean)
 
-    private class Landed(val embed: String, val audio: Boolean)
+    /** A shared file in the vault. A recording keeps its name and type for the engine that transcribes it. */
+    private class Landed(val embed: String, val audio: Boolean, val name: String?, val mime: String?)
 
     /**
      * Another app shared something into VaultDrop: at launch, straight after
@@ -1990,7 +1992,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     if (leading) appendShared(landed.embed, block = true) else insertAtCaret(landed.embed, block = true)
                     leading = false
                     if (landed.audio) {
-                        val transcript = transcribeShared(file.uri)
+                        val transcript = transcribeShared(pin, file.uri, landed.name, landed.mime)
                         if (transcript != null && isStillOpen(pin)) insertAtCaret(transcript, block = true)
                     }
                 }
@@ -2011,36 +2013,54 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * One shared file, named and copied through [attach]. Its name and type are
-     * the sender's to tell, asked here on IO and never on the launch path.
+     * the sender's to tell, asked here on IO and never on the launch path. The
+     * stream is opened and closed on IO by [attachFrom], as a photo's is.
      */
     private suspend fun attachShared(pin: Pin, file: SharedFile): Landed? {
         val files = repo?.files ?: return null
-        val (name, audio, source) = withContext(Dispatchers.IO) {
-            val about = files.describeShared(file.uri)
-            val mime = about.mimeType ?: file.type
-            Triple(
-                Sharing.fileName(about.displayName, mime, LocalDateTime.now(), VaultFiles::extensionFor),
-                listOfNotNull(about.mimeType, file.type).any { it.startsWith("audio/") },
-                files.openShared(file.uri),
-            )
-        }
-        val embed = source?.use { attach(pin, name.stem, name.ext, it) } ?: return null
-        return Landed(embed, audio)
+        val about = withContext(Dispatchers.IO) { files.describeShared(file.uri) }
+        val mime = about.mimeType ?: file.type
+        val name = Sharing.fileName(about.displayName, mime, LocalDateTime.now(), VaultFiles::extensionFor)
+        val audio = listOfNotNull(about.mimeType, file.type).any { it.startsWith("audio/") }
+        val embed = attachFrom(pin, name.stem, name.ext) { files.openShared(file.uri) } ?: return null
+        return Landed(embed, audio, about.displayName, mime)
     }
 
     /**
      * The transcript of a shared recording, to go under its embed, or null to
-     * leave the recording on its own. Always null for now.
+     * leave the recording on its own.
      *
-     * Open Transcribe connects here (docs/plans/multimedia.md, "Audio shared
-     * in"). When an engine has been chosen, open [audio] as a
-     * `ParcelFileDescriptor` on IO, pass it to `transcribe(pfd)` and return the
-     * text, or null on any failure. [audio] is the sender's URI and readable
-     * only while the activity lives, so open it before anything slow. The pin
-     * is held until this returns, so the note cannot move under the transcript.
+     * Only an Open Transcribe app the user has already picked for the mic is
+     * used, and only while it is still installed under the same certificate:
+     * the contract has the user choose who gets their audio, and a share is no
+     * moment to ask. System voice input listens to the microphone and cannot
+     * be handed a file, so with that picked the recording stays as it is.
+     *
+     * [audio] is the sender's URI, readable only while the activity lives, so
+     * it is opened before the engine is bound. The pin is held until this
+     * returns, so the note cannot move under the transcript.
      */
-    @Suppress("RedundantSuspendModifier", "UNUSED_PARAMETER")
-    private suspend fun transcribeShared(audio: Uri): String? = null
+    private suspend fun transcribeShared(pin: Pin, audio: Uri, fileName: String?, mimeType: String?): String? {
+        val stored = store.voiceEngine as? VoiceEngine.OpenTranscribe ?: return null
+        val app = getApplication<Application>()
+        val options = withContext(Dispatchers.IO) { findVoiceOptions(app) }
+        val engine = (chooseVoice(options, stored) as? VoiceChoice.Use)?.engine as? VoiceEngine.OpenTranscribe
+            ?: return null
+        val label = options.transcribers.firstOrNull { it.engine.sameService(engine) }?.label ?: engine.packageName
+        val fd = withContext(Dispatchers.IO) { repo?.files?.openSharedFile(audio) } ?: return null
+        val working = "$label is transcribing the recording…"
+        state = state.copy(notice = working)
+        val result = transcribeFile(app, engine, fd, fileName, mimeType)
+        if (state.notice == working) state = state.copy(notice = null)
+        return when (result) {
+            is VoiceEvent.Final -> dictationText(result.text, null).ifEmpty { null }
+            is VoiceEvent.Failure -> {
+                if (isStillOpen(pin)) dictationFailed(pin, Transcribing(engine, label), result.reason)
+                null
+            }
+            is VoiceEvent.Progress -> null
+        }
+    }
 
     // ── Coming back ──────────────────────────────────────────────────────────
 

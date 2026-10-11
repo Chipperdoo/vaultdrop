@@ -3,6 +3,7 @@ package dev.vaultdrop.core
 import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
@@ -211,6 +212,19 @@ class VaultFiles(context: Context, val treeUri: Uri) {
         } catch (_: Exception) {
             // The sender's grant lapsed, or its provider refused: a file that
             // cannot be copied, which the caller reports.
+            null
+        }
+    }
+
+    /**
+     * [openShared] as a descriptor, for a transcription engine that reads the
+     * file in its own process. Only `content:` URIs, for the same reason.
+     */
+    fun openSharedFile(uri: Uri): ParcelFileDescriptor? {
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT) return null
+        return try {
+            resolver.openFileDescriptor(uri, "r")
+        } catch (_: Exception) {
             null
         }
     }
