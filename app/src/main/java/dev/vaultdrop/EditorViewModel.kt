@@ -14,6 +14,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.vaultdrop.core.AppConfig
+import dev.vaultdrop.core.Attachments
 import dev.vaultdrop.core.ConfigStore
 import dev.vaultdrop.core.DailyNote
 import dev.vaultdrop.core.DayIndex
@@ -21,6 +22,7 @@ import dev.vaultdrop.core.Hashing
 import dev.vaultdrop.core.IndexEntry
 import dev.vaultdrop.core.LinterConfig
 import dev.vaultdrop.core.LinkScan
+import dev.vaultdrop.core.NotePath
 import dev.vaultdrop.core.OpenNote
 import dev.vaultdrop.core.SearchHit
 import dev.vaultdrop.core.TrashOption
@@ -29,6 +31,7 @@ import dev.vaultdrop.core.VaultFiles
 import dev.vaultdrop.core.VaultRepository
 import dev.vaultdrop.core.VaultSearch
 import dev.vaultdrop.core.WikiIndex
+import dev.vaultdrop.core.splice
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -36,6 +39,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.InputStream
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.Locale
@@ -57,6 +61,13 @@ data class DayRow(
      */
     val exists: Boolean?,
 )
+
+/**
+ * The note a capture started on, held from the moment it starts until what it
+ * captured lands. [EditorViewModel.isStillOpen] says whether that is still the
+ * note on screen.
+ */
+data class Pin(val generation: Int, val note: NotePath)
 
 data class UiState(
     val screen: Screen = Screen.FirstRun,
@@ -80,6 +91,12 @@ data class UiState(
     /** The day a step would land on, or null at that edge. */
     val prevDayLabel: String? = null,
     val nextDayLabel: String? = null,
+    /**
+     * A capture is working on the note on screen: a photo being copied in, a
+     * dictation being transcribed. Nothing that leaves the note works until it
+     * lands. See [EditorViewModel.pin].
+     */
+    val captureInFlight: Boolean = false,
     val configMissing: Boolean = false,
     val config: VaultConfig = VaultConfig(),
     // Phase 2
@@ -156,9 +173,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * `.obsidian/app.json`. Picked up live like [linterConfig] and for the same
      * reason: it does not decide where a note lives, only what happens when one
-     * is deleted, so honouring a change straight away is what the user editing it
-     * in Obsidian would expect.
+     * is deleted and where an attachment goes, so honouring a change straight
+     * away is what the user editing it in Obsidian would expect.
+     *
+     * Written on IO by Phase 2, Reload config and every [attach], and read on
+     * the main thread by delete.
      */
+    @Volatile
     private var appConfig: AppConfig = AppConfig()
 
     /** The body as last written, so a save that would change nothing is skipped. */
@@ -197,6 +218,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var openJob: Job? = null
     private var openGeneration = 0
+
+    /** How many captures hold a [Pin] right now. Main thread only. */
+    private var pins = 0
+
+    /** Midnight went past while a capture held the note; the last [unpin] catches up. */
+    private var rollOverPending = false
 
     /** The day sheet's probes. One sheet's worth at a time. */
     private var dayProbeJob: Job? = null
@@ -365,6 +392,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 VerifyLine("template", config.template.ifEmpty { "none" }),
                 VerifyLine("linter", linterLine()),
                 VerifyLine("deleted files", trashLine()),
+                VerifyLine("attachments", attachmentLine()),
             )
             state = state.copy(
                 screen = Screen.Verifying,
@@ -499,13 +527,26 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             linterConfig = it
             store.saveLinter(it)
         }
-        // Same treatment, same reason: `trashOption` is read live so a change made
-        // in Obsidian applies to the next delete, not the next launch.
+        // Same treatment, same reason: `trashOption` and the attachment settings
+        // are read live so a change made in Obsidian applies to the next delete
+        // or attachment, not the next launch.
+        refreshAppConfig(repository)
+        return fresh
+    }
+
+    /**
+     * Probes `.obsidian/app.json` and adopts it if it moved. IO.
+     *
+     * Phase 2 and Reload config come through here, and so does every [attach]:
+     * resuming probes nothing, so a folder changed in Obsidian since then would
+     * otherwise send the next photo to the old one.
+     */
+    private fun refreshAppConfig(repository: VaultRepository): AppConfig {
         repository.appChangedSince(appConfig)?.let {
             appConfig = it
             store.saveApp(it)
         }
-        return fresh
+        return appConfig
     }
 
     // ── Editing ──────────────────────────────────────────────────────────────
@@ -610,6 +651,83 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ── Capturing ────────────────────────────────────────────────────────────
+
+    /**
+     * Holds the note on screen for a capture, until [unpin].
+     *
+     * A photo or a dictation that finishes after you have moved to another day
+     * would land in the wrong note. So while any capture holds a pin, the
+     * chevrons, the swipe, the day sheet and delete are off, and a rollover past
+     * midnight waits for the last one to let go. Every pin needs exactly one
+     * [unpin], however the capture ends.
+     *
+     * The note may still be being created when the capture starts. The pin
+     * holds the day rather than the [OpenNote], through [openGeneration], the
+     * same test [createDay] makes, so text that lands in that gap goes in after
+     * the template like anything else typed there.
+     *
+     * @return null when there is no note on screen to pin.
+     */
+    fun pin(): Pin? {
+        if (repo == null || state.screen != Screen.Editor) return null
+        pins++
+        state = state.copy(captureInFlight = true, daysOpen = false, deleteOpen = false)
+        return Pin(openGeneration, note?.path ?: DailyNote.resolve(activeConfig, openDate))
+    }
+
+    /** Lets go of one [pin]. The last one out turns leaving back on. */
+    fun unpin() {
+        if (pins == 0) return
+        if (--pins > 0) return
+        state = state.copy(captureInFlight = false)
+        if (rollOverPending) {
+            rollOverPending = false
+            rollOver()
+        }
+    }
+
+    /** Whether [pin]'s note is still the one on screen. Check before splicing anything in. */
+    fun isStillOpen(pin: Pin): Boolean = pin.generation == openGeneration
+
+    /**
+     * Puts [insert] into the note at the caret, as a line of its own or as
+     * prose; see [splice]. Through the field's own buffer, like [insertLink], so
+     * the note is not copied around it, and autosave picks it up from there.
+     *
+     * The caret is the far end of any selection, so selected text stays.
+     */
+    fun insertAtCaret(insert: String, block: Boolean) {
+        val edit = splice(body.text, body.selection.max, insert, block)
+        if (edit.text.isEmpty()) return
+        body.edit {
+            replace(edit.start, edit.end, edit.text)
+            selection = TextRange(edit.caret)
+        }
+    }
+
+    /**
+     * Copies [source] into the vault as an attachment of [pin]'s note, and
+     * returns the embed for it. Null when nothing was written, including when
+     * the note is no longer on screen.
+     *
+     * `app.json` is probed first, every time; see [refreshAppConfig]. When the
+     * file has not moved that is one metadata query, and it means Obsidian's
+     * settings decide where the file goes at the moment it is written.
+     *
+     * Call from the main thread. The copy runs on IO. [source] is not closed
+     * here, and nothing is spliced: check [isStillOpen] again when this
+     * returns, then hand the embed to [insertAtCaret].
+     */
+    suspend fun attach(pin: Pin, stem: String, ext: String, source: InputStream): String? {
+        val repository = repo ?: return null
+        if (!isStillOpen(pin)) return null
+        return withContext(Dispatchers.IO) {
+            val app = refreshAppConfig(repository)
+            repository.attach(pin.note, stem, ext, source, app)?.let { Attachments.embed(it, pin.note, app) }
+        }
+    }
+
     // ── Day navigation ───────────────────────────────────────────────────────
 
     /**
@@ -618,6 +736,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * note gets made — tapping a day in the sheet is.
      */
     fun stepDay(direction: Int) {
+        if (state.captureInFlight) return
         val target = if (direction < 0) dayIndex?.before(openDate) else dayIndex?.after(openDate)
         if (target == null || target.isAfter(LocalDate.now())) return
         saveNow()
@@ -625,6 +744,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun goToDate(date: LocalDate) {
+        if (state.captureInFlight) return
         saveNow()
         openDay(date, create = true, showCreatedNotice = true)
         state = state.copy(daysOpen = false)
@@ -819,6 +939,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * once, the first time it matters, rather than every time or not at all.
      */
     fun askDelete() {
+        if (state.captureInFlight) return
         val fallback = appConfig.trash == TrashOption.System && !store.trashFallbackExplained
         if (fallback) store.trashFallbackExplained = true
         state = state.copy(
@@ -847,6 +968,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun confirmDelete() {
         val repository = repo ?: return
         val current = note ?: return
+        if (state.captureInFlight) return
         val date = openDate
         note = null
         state = state.copy(deleteOpen = false)
@@ -916,6 +1038,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun openDays() {
         val repository = repo ?: return
+        if (state.captureInFlight) return
         val today = LocalDate.now()
         val known = dayIndex
         state = state.copy(
@@ -1125,6 +1248,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         linkJob?.cancel()
         openJob?.cancel()
         dayProbeJob?.cancel()
+        // A capture still working lands against a vault that has gone, and
+        // drops rather than writing into whichever vault is picked next.
+        openGeneration++
+        rollOverPending = false
         scannedQuery = null
         store.clear()
         WikiIndex.clear(getApplication<Application>())
@@ -1173,6 +1300,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         TrashOption.System -> "system trash → .trash/"
         TrashOption.Local -> ".trash/"
         TrashOption.None -> "delete permanently"
+    }
+
+    /** Where an attachment goes, in the shapes Obsidian's own setting offers. */
+    private fun attachmentLine(): String {
+        val setting = appConfig.attachmentFolder
+        // Resolved against a note at the root, which leaves just the setting's own folders.
+        val folder = Attachments.folderFor(setting, NotePath(emptyList(), "")).joinToString("/")
+        return when {
+            setting == "." || setting == "./" -> "the note's folder"
+            setting.startsWith("./") -> "$folder/ in the note's folder"
+            folder.isEmpty() -> "vault root"
+            else -> "$folder/"
+        }
     }
 
     /** What the verify screen says about the plugin, in the plugin's own terms. */
@@ -1273,6 +1413,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun rollOver() {
         if (repo == null || state.screen != Screen.Editor) return
+        // A capture still belongs to the note it started in; see [pin].
+        if (state.captureInFlight) {
+            rollOverPending = true
+            return
+        }
         val today = LocalDate.now()
         if (today == anchoredTo) return
         val wasOnLatest = openDate == anchoredTo

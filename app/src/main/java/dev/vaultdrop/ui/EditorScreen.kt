@@ -42,6 +42,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextOverflow
@@ -115,6 +116,7 @@ fun EditorScreen(
                 created = state.created,
                 canGoPrev = state.canGoPrev,
                 canGoNext = state.canGoNext,
+                pinned = state.captureInFlight,
                 onOpenDays = onOpenDays,
                 onStepDay = onStepDay,
                 onOpenSearch = onOpenSearch,
@@ -141,7 +143,7 @@ fun EditorScreen(
                     .weight(1f)
                     .fillMaxWidth()
                     .daySwipe(
-                        enabled = !state.daysOpen,
+                        enabled = !state.daysOpen && !state.captureInFlight,
                         canGoForward = state.canGoNext,
                         canGoBack = state.canGoPrev,
                         onDrag = { scope.launch { drag.snapTo(it) } },
@@ -328,6 +330,8 @@ private fun TopBar(
     created: Boolean,
     canGoPrev: Boolean,
     canGoNext: Boolean,
+    /** A capture holds the note on screen, so nothing here may leave it. */
+    pinned: Boolean,
     onOpenDays: () -> Unit,
     onStepDay: (Int) -> Unit,
     onOpenSearch: () -> Unit,
@@ -349,7 +353,7 @@ private fun TopBar(
             modifier = Modifier
                 .weight(1f)
                 .height(48.dp)
-                .clickable(onClick = onOpenDays),
+                .clickable(enabled = !pinned, onClick = onOpenDays),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -376,16 +380,19 @@ private fun TopBar(
             }
         }
 
-        BarButton(enabled = canGoPrev, onClick = { onStepDay(-1) }) {
-            Chevron(barInk(canGoPrev), pointsLeft = true)
+        val prev = canGoPrev && !pinned
+        val next = canGoNext && !pinned
+        BarButton(enabled = prev, onClick = { onStepDay(-1) }) {
+            Chevron(barInk(prev), pointsLeft = true)
         }
-        BarButton(enabled = canGoNext, onClick = { onStepDay(1) }) {
-            Chevron(barInk(canGoNext), pointsLeft = false)
+        BarButton(enabled = next, onClick = { onStepDay(1) }) {
+            Chevron(barInk(next), pointsLeft = false)
         }
         BarButton(enabled = true, onClick = onOpenSearch) {
             SearchGlyph(c.onSurface)
         }
         OverflowButton(
+            canDelete = !pinned,
             onChangeVault = onChangeVault,
             onReloadConfig = onReloadConfig,
             onAskReindex = onAskReindex,
@@ -414,6 +421,7 @@ private fun BarButton(enabled: Boolean, onClick: () -> Unit, icon: @Composable (
 
 @Composable
 private fun OverflowButton(
+    canDelete: Boolean,
     onChangeVault: () -> Unit,
     onReloadConfig: () -> Unit,
     onAskReindex: () -> Unit,
@@ -450,9 +458,13 @@ private fun OverflowButton(
                 onClick = { open = false; onChangeVault() },
             )
             // Last, and in the error ink: the only item here that moves a note.
+            // Disabled, it takes the menu's own disabled ink instead.
             DropdownMenuItem(
-                text = { Text("Delete note", style = T.stripTitle, color = c.error) },
+                text = {
+                    Text("Delete note", style = T.stripTitle, color = if (canDelete) c.error else Color.Unspecified)
+                },
                 onClick = { open = false; onAskDelete() },
+                enabled = canDelete,
             )
         }
     }
