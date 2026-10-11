@@ -38,7 +38,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        // Scrib's Open Transcribe contract is AIDL, which AGP 8 and later leave off.
+        aidl = true
+    }
 
     testOptions {
         unitTests.isReturnDefaultValues = true

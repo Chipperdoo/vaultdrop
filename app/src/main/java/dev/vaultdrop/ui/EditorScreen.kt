@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.LaunchedEffect
 import dev.vaultdrop.DayRow
 import dev.vaultdrop.UiState
+import dev.vaultdrop.VoiceOption
 import dev.vaultdrop.core.IndexEntry
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -82,6 +83,13 @@ fun EditorScreen(
     onMic: () -> Unit,
     onTakePhoto: () -> Unit,
     onChoosePhotos: () -> Unit,
+    onMicStop: () -> Unit,
+    onMicCancel: () -> Unit,
+    onMicPick: (VoiceOption) -> Unit,
+    onMicPickerClose: () -> Unit,
+    onMicSettings: () -> Unit,
+    /** Opens the app a notice names, by package. */
+    onMicOpenApp: (String) -> Unit,
 ) {
     val c = MaterialTheme.colorScheme
     val drag = remember { Animatable(0f) }
@@ -95,7 +103,7 @@ fun EditorScreen(
     // below. The confirmations need this as much as the sheet does: their
     // buttons sit low enough that an open keyboard hides the very choice they
     // are asking for.
-    val overlayOpen = state.daysOpen || state.deleteOpen || state.reindexOpen
+    val overlayOpen = state.daysOpen || state.deleteOpen || state.reindexOpen || state.voicePicker != null
     LaunchedEffect(overlayOpen) {
         if (overlayOpen) focusManager.clearFocus()
     }
@@ -127,6 +135,7 @@ fun EditorScreen(
                 onReloadConfig = onReloadConfig,
                 onAskReindex = onAskReindex,
                 onAskDelete = onAskDelete,
+                onVoiceInput = onMicSettings,
             )
 
             if (state.configMissing) {
@@ -220,6 +229,10 @@ fun EditorScreen(
                 }
             }
 
+            // Sits above the `[[` strip rather than giving way to it, so Stop and
+            // Cancel stay in reach while a link is being typed.
+            state.dictation?.let { DictationStrip(it, onStop = onMicStop, onCancel = onMicCancel) }
+
             if (state.linkOpen) {
                 LinkStrip(
                     query = state.linkQuery,
@@ -283,9 +296,12 @@ fun EditorScreen(
         }
 
         state.notice?.let { notice ->
+            val app = state.noticeApp?.takeIf { it.notice == notice }
             NoticeBar(
                 text = notice,
                 onDismiss = onDismissNotice,
+                action = app?.let { "OPEN ${it.label.uppercase()}" },
+                onAction = { app?.let { onMicOpenApp(it.packageName) } },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .imePadding()
@@ -312,6 +328,8 @@ fun EditorScreen(
         if (state.reindexOpen) {
             ConfirmReindex(onConfirm = onConfirmReindex, onDismiss = onCancelReindex)
         }
+
+        state.voicePicker?.let { VoiceSheet(it, onPick = onMicPick, onDismiss = onMicPickerClose) }
     }
 }
 
@@ -352,6 +370,7 @@ private fun TopBar(
     onReloadConfig: () -> Unit,
     onAskReindex: () -> Unit,
     onAskDelete: () -> Unit,
+    onVoiceInput: () -> Unit,
 ) {
     val c = MaterialTheme.colorScheme
     Row(
@@ -410,6 +429,7 @@ private fun TopBar(
             onReloadConfig = onReloadConfig,
             onAskReindex = onAskReindex,
             onAskDelete = onAskDelete,
+            onVoiceInput = onVoiceInput,
         )
     }
 }
@@ -439,6 +459,7 @@ private fun OverflowButton(
     onReloadConfig: () -> Unit,
     onAskReindex: () -> Unit,
     onAskDelete: () -> Unit,
+    onVoiceInput: () -> Unit,
 ) {
     val c = MaterialTheme.colorScheme
     var open by remember { mutableStateOf(false) }
@@ -465,6 +486,10 @@ private fun OverflowButton(
             DropdownMenuItem(
                 text = { Text("Reindex vault", style = T.stripTitle) },
                 onClick = { open = false; onAskReindex() },
+            )
+            DropdownMenuItem(
+                text = { Text("Voice input…", style = T.stripTitle) },
+                onClick = { open = false; onVoiceInput() },
             )
             DropdownMenuItem(
                 text = { Text("Change vault", style = T.stripTitle) },
