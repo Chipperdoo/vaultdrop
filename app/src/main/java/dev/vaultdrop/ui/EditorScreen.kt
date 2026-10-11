@@ -79,6 +79,7 @@ fun EditorScreen(
     onAskDelete: () -> Unit,
     onConfirmDelete: () -> Unit,
     onCancelDelete: () -> Unit,
+    onMic: () -> Unit,
 ) {
     val c = MaterialTheme.colorScheme
     val drag = remember { Animatable(0f) }
@@ -225,6 +226,15 @@ fun EditorScreen(
                     matches = state.linkMatches,
                     onPick = onPickLink,
                 )
+            } else {
+                // Stays up while a capture holds the note, with its buttons off,
+                // so the row does not jump in and out under the thumb.
+                val capturing = state.captureInFlight
+                CaptureRow {
+                    CaptureButton(label = "Voice input", enabled = !capturing, onClick = onMic) {
+                        MicGlyph(barInk(!capturing))
+                    }
+                }
             }
         }
 
@@ -278,7 +288,8 @@ fun EditorScreen(
                     .align(Alignment.BottomCenter)
                     .imePadding()
                     .navigationBarsPadding()
-                    .padding(start = 12.dp, end = 12.dp, bottom = 14.dp),
+                    // Clear of the capture row, so a notice never sits on its buttons.
+                    .padding(start = 12.dp, end = 12.dp, bottom = 14.dp + T.touch),
             )
         }
 

@@ -59,6 +59,15 @@ class ConfigStore(context: Context) {
         get() = prefs.getBoolean(KEY_TRASH_EXPLAINED, false)
         set(value) = prefs.edit { putBoolean(KEY_TRASH_EXPLAINED, value) }
 
+    /**
+     * The app the mic hands speech to, once the user has picked one. Kept
+     * across a change of vault: which apps are installed is a fact about this
+     * phone, not about the vault. Read on a mic tap, never by Phase 1.
+     */
+    var voiceEngine: VoiceEngine?
+        get() = VoiceEngine.fromCache(prefs.getString(KEY_VOICE, null))
+        set(value) = prefs.edit { putString(KEY_VOICE, value?.toJson()) }
+
     fun saveVault(uri: Uri, config: VaultConfig) {
         prefs.edit {
             putString(KEY_VAULT, uri.toString())
@@ -66,8 +75,13 @@ class ConfigStore(context: Context) {
         }
     }
 
+    /** Forgets the vault and everything read out of it. The voice pick stays; see [voiceEngine]. */
     fun clear() {
-        prefs.edit { this.clear() }
+        val voice = prefs.getString(KEY_VOICE, null)
+        prefs.edit {
+            this.clear()
+            if (voice != null) putString(KEY_VOICE, voice)
+        }
     }
 
     private companion object {
@@ -77,5 +91,6 @@ class ConfigStore(context: Context) {
         const val KEY_LINTER = "linter"
         const val KEY_APP = "app"
         const val KEY_TRASH_EXPLAINED = "trash_fallback_explained"
+        const val KEY_VOICE = "voice_engine"
     }
 }

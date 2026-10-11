@@ -27,9 +27,27 @@ you just need to write something down.
   `trashOption` setting.
 - **Stamps `date created` / `date modified`** if you use the Linter plugin,
   reading that plugin's own settings.
+- **Takes dictation** through the voice apps already on your phone. See
+  [Voice input](#voice-input).
 
 Nothing above is a VaultDrop preference. Every setting is one you already made
 in Obsidian, so a vault carried to another device behaves the same way there.
+
+## Voice input
+
+VaultDrop does no speech recognition of its own. It works with the voice apps
+you already have, in two ways:
+
+- **A voice keyboard.** The note is a plain text field, so a keyboard's mic
+  types straight into it: Gboard's, FUTO Keyboard's, Scrib's. Android's Voice
+  Access works too. There is nothing to set up.
+- **The mic above the keyboard** fires Android's own voice input
+  (`RECOGNIZE_SPEECH`). The app your phone uses for it shows its window and
+  listens, and the text goes in at the caret. Google, FUTO Voice Input,
+  Transcribro and Kõnele all answer it. If several do, Android asks which one
+  and remembers. VaultDrop needs no microphone permission for this.
+
+With no voice app installed, the mic says so and names two free ones on F-Droid.
 
 ## Requirements
 
