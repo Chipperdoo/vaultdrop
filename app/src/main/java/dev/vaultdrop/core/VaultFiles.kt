@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import java.io.FileNotFoundException
 import java.io.InputStream
@@ -169,6 +170,51 @@ class VaultFiles(context: Context, val treeUri: Uri) {
     fun isAt(uri: Uri, relativePath: String): Boolean =
         runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull() == docIdFor(relativePath)
 
+    // ── Reading what another app shared ──────────────────────────────────────
+
+    /** What a shared file says about itself. Its provider may answer neither. */
+    data class Shared(val displayName: String?, val mimeType: String?)
+
+    /**
+     * The shared file's `DISPLAY_NAME` and type, from the app that shared it.
+     * Two round trips into that app's provider, so never on the launch path.
+     */
+    fun describeShared(uri: Uri): Shared {
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT) return Shared(null, null)
+        val name = try {
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getString(0) else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+        val mime = try {
+            resolver.getType(uri)
+        } catch (_: Exception) {
+            null
+        }
+        return Shared(name, mime)
+    }
+
+    /**
+     * Opens a shared file for reading, or null.
+     *
+     * Only `content:` URIs. A `file:` URI would be read with VaultDrop's own
+     * permissions, so any app could share `file:///data/data/dev.vaultdrop/…`
+     * and have VaultDrop copy its private files into the vault for the sync
+     * client to carry off.
+     */
+    fun openShared(uri: Uri): InputStream? {
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT) return null
+        return try {
+            resolver.openInputStream(uri)
+        } catch (_: Exception) {
+            // The sender's grant lapsed, or its provider refused: a file that
+            // cannot be copied, which the caller reports.
+            null
+        }
+    }
+
     // ── Walking (Phase 2 only) ───────────────────────────────────────────────
 
     data class Child(val name: String, val mimeType: String?) {
@@ -251,6 +297,10 @@ class VaultFiles(context: Context, val treeUri: Uri) {
             MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.lowercase(Locale.ROOT)) ?: MIME_UNKNOWN
 
         private const val MIME_UNKNOWN = "application/octet-stream"
+
+        /** [mimeFor] the other way round, for a shared file whose name has no extension. */
+        fun extensionFor(mime: String): String? =
+            MimeTypeMap.getSingleton().getExtensionFromMimeType(mime.lowercase(Locale.ROOT))
 
         /** A 4 MB photo in 64 writes rather than the 512 the default buffer takes. */
         private const val COPY_BUFFER = 64 * 1024

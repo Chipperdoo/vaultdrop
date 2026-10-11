@@ -1,6 +1,7 @@
 package dev.vaultdrop
 
 import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -31,11 +32,23 @@ class MainActivity : ComponentActivity() {
         // filesystem operation on the critical path.
         vm.phase1()
 
+        // A share from another app is read off the intent, which is already in
+        // memory. Its text is in the first frame. Its files wait for the editor.
+        // A recreated activity has delivered its share already.
+        if (savedInstanceState == null) Share.from(intent)?.let(vm::receiveShare)
+
         setContent {
             VaultDropTheme {
                 VaultDropApp(vm)
             }
         }
+    }
+
+    /** A share into the running app. `singleTask` brings it here rather than to a second editor. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        Share.from(intent)?.let(vm::receiveShare)
     }
 
     /** Nothing in flight is lost on the way out. */
@@ -132,9 +145,13 @@ fun VaultDropApp(vm: EditorViewModel) {
         )
     }
 
-    // Phase 2 begins only once the editor is up and the caret is live.
+    // Phase 2 begins only once the editor is up and the caret is live, and so
+    // does copying in any files that were shared at launch.
     LaunchedEffect(state.screen) {
-        if (state.screen == Screen.Editor) vm.startPhase2()
+        if (state.screen == Screen.Editor) {
+            vm.startPhase2()
+            vm.attachSharedFiles()
+        }
     }
 
     BackHandler(
