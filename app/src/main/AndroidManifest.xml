@@ -1,10 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Open Transcribe only: VaultDrop records and the engine transcribes.
+         Asked for the first time an Open Transcribe app is used, never before. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- A phone with no mic still has the keyboard, and the note is the app. -->
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
     <queries>
         <!-- Voice input: whichever app answers Android's own speech intent. -->
         <intent>
             <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+        <!-- Voice input: Scrib, and any other app that speaks Open Transcribe. -->
+        <intent>
+            <action android:name="org.opentranscribe.api.ITranscriptionService" />
         </intent>
     </queries>
 

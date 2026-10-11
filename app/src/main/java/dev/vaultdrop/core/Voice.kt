@@ -61,6 +61,49 @@ sealed interface VoiceEngine {
     }
 }
 
+/**
+ * What a request to an Open Transcribe engine reports: any number of
+ * [Progress], then exactly one [Final] or [Failure]. The contract promises the
+ * one terminal call, and the client in `voice/` keeps that promise on its own
+ * side too, when it gives up or the engine dies.
+ */
+sealed interface VoiceEvent {
+    /** Everything heard so far. Cumulative, and it only ever grows. */
+    data class Progress(val text: String) : VoiceEvent
+
+    /** The whole transcript. */
+    data class Final(val text: String) : VoiceEvent
+
+    data class Failure(val reason: VoiceFailure) : VoiceEvent
+}
+
+/** Why a request ended without a transcript. */
+sealed interface VoiceFailure {
+    /** The user cancelled. Not worth a notice. */
+    data object Cancelled : VoiceFailure
+
+    /** The engine has no speech model yet, and says so in its capabilities or its error. */
+    data object ModelNotReady : VoiceFailure
+
+    /** The engine turned the request down. Scrib does while its benchmark runs. */
+    data object Busy : VoiceFailure
+
+    /** Android would not bind to the engine at all. */
+    data object Unreachable : VoiceFailure
+
+    /** The engine went away part way through. */
+    data object Died : VoiceFailure
+
+    /** The engine went quiet for longer than [IdleTimeout] allows. */
+    data object TimedOut : VoiceFailure
+
+    /** The microphone would not start, or stopped giving audio. */
+    data object Microphone : VoiceFailure
+
+    /** The engine's own error, in its own words when it gave any. */
+    data class Engine(val message: String?) : VoiceFailure
+}
+
 /** An Open Transcribe service installed on the phone, as of the tap that looked. */
 data class Transcriber(val engine: VoiceEngine.OpenTranscribe, val label: String)
 

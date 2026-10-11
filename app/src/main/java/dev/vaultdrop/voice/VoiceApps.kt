@@ -6,6 +6,10 @@ import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.os.Build
 import android.speech.RecognizerIntent
+import androidx.core.content.pm.PackageInfoCompat
+import dev.vaultdrop.core.Hashing
+import dev.vaultdrop.core.Transcriber
+import dev.vaultdrop.core.VoiceEngine
 import dev.vaultdrop.core.VoiceOptions
 
 /**
@@ -24,10 +28,52 @@ fun findVoiceOptions(context: Context): VoiceOptions {
         recognizers.any { it.activityInfo.packageName == chosen.packageName && it.activityInfo.name == chosen.name }
     }
     return VoiceOptions(
+        transcribers = findTranscribers(pm),
         system = recognizers.isNotEmpty(),
         systemLabel = default?.applicationInfo?.loadLabel(pm)?.toString()?.ifBlank { null },
     )
 }
+
+/** The action every Open Transcribe service answers, and the name its interface is bound by. */
+const val OPEN_TRANSCRIBE_ACTION = "org.opentranscribe.api.ITranscriptionService"
+
+/**
+ * Every installed Open Transcribe service, named the way the launcher names
+ * its app, with the certificate it is signed with. One the system will not let
+ * VaultDrop bind, or whose certificate cannot be read, is left out.
+ */
+private fun findTranscribers(pm: PackageManager): List<Transcriber> =
+    pm.servicesFor(Intent(OPEN_TRANSCRIBE_ACTION)).mapNotNull { info ->
+        val service = info.serviceInfo ?: return@mapNotNull null
+        if (!service.exported) return@mapNotNull null
+        val cert = signingCert(pm, service.packageName) ?: return@mapNotNull null
+        Transcriber(
+            VoiceEngine.OpenTranscribe(service.packageName, service.name, cert),
+            label = info.loadLabel(pm).toString().ifBlank { service.packageName },
+        )
+    }.sortedBy { it.label.lowercase() }
+
+/**
+ * SHA-256 of the certificates [packageName] is signed with, sorted and joined,
+ * so an app with more than one signer still has a single value to compare.
+ */
+private fun signingCert(pm: PackageManager, packageName: String): String? = try {
+    PackageInfoCompat.getSignatures(pm, packageName)
+        .map { Hashing.sha256(it.toByteArray()) }
+        .sorted()
+        .joinToString(",")
+        .ifEmpty { null }
+} catch (_: PackageManager.NameNotFoundException) {
+    null
+}
+
+private fun PackageManager.servicesFor(intent: Intent): List<ResolveInfo> =
+    if (Build.VERSION.SDK_INT >= 33) {
+        queryIntentServices(intent, PackageManager.ResolveInfoFlags.of(0))
+    } else {
+        @Suppress("DEPRECATION")
+        queryIntentServices(intent, 0)
+    }
 
 private fun PackageManager.activitiesFor(intent: Intent): List<ResolveInfo> =
     if (Build.VERSION.SDK_INT >= 33) {

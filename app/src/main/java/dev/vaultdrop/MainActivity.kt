@@ -1,5 +1,6 @@
 package dev.vaultdrop
 
+import android.Manifest
 import android.content.ActivityNotFoundException
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -11,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
 import dev.vaultdrop.ui.EditorScreen
 import dev.vaultdrop.ui.FirstRunScreen
 import dev.vaultdrop.ui.SearchScreen
@@ -44,10 +46,19 @@ class MainActivity : ComponentActivity() {
         vm.saveNow()
     }
 
-    /** The two halves of "how long have we been away", for the resume reindex. */
+    /**
+     * The two halves of "how long have we been away", for the resume reindex.
+     *
+     * Leaving also closes the mic on a dictation. An app in the background
+     * cannot keep listening without a microphone foreground service, and this
+     * one has none, so the dictation stops the way the Stop button stops it:
+     * what was heard is still transcribed, and lands when it arrives. Turning
+     * the phone is not leaving, and the dictation carries on through it.
+     */
     override fun onStop() {
         super.onStop()
         vm.onBackgrounded()
+        if (!isChangingConfigurations) vm.stopDictation()
     }
 
     override fun onResume() {
@@ -65,6 +76,10 @@ fun VaultDropApp(vm: EditorViewModel) {
     ) { uri -> vm.onVaultPicked(uri) }
 
     val recognizer = rememberLauncherForActivityResult(RecognizeSpeech()) { vm.onRecognized(it) }
+    val micPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> vm.onMicPermission(granted) }
+    val context = LocalContext.current
 
     // Voice input asks for what only an activity can start. Collected for as
     // long as the activity lives; a request sent between two of them waits.
@@ -76,6 +91,7 @@ fun VaultDropApp(vm: EditorViewModel) {
                 } catch (_: ActivityNotFoundException) {
                     vm.onRecognizerMissing()
                 }
+                VoiceLaunch.MicPermission -> micPermission.launch(Manifest.permission.RECORD_AUDIO)
             }
         }
     }
@@ -126,6 +142,17 @@ fun VaultDropApp(vm: EditorViewModel) {
             onConfirmDelete = vm::confirmDelete,
             onCancelDelete = vm::cancelDelete,
             onMic = vm::onMic,
+            onMicStop = vm::stopDictation,
+            onMicCancel = vm::cancelDictation,
+            onMicPick = vm::pickVoice,
+            onMicPickerClose = vm::closeVoicePicker,
+            onMicSettings = vm::openVoicePicker,
+            onMicOpenApp = { packageName ->
+                vm.dismissNotice()
+                context.packageManager.getLaunchIntentForPackage(packageName)?.let {
+                    runCatching { context.startActivity(it) }
+                }
+            },
         )
     }
 
@@ -135,9 +162,11 @@ fun VaultDropApp(vm: EditorViewModel) {
     }
 
     BackHandler(
-        enabled = state.daysOpen || state.searchOpen || state.deleteOpen || state.reindexOpen,
+        enabled = state.daysOpen || state.searchOpen || state.deleteOpen || state.reindexOpen ||
+            state.voicePicker != null,
     ) {
         when {
+            state.voicePicker != null -> vm.closeVoicePicker()
             state.deleteOpen -> vm.cancelDelete()
             state.reindexOpen -> vm.cancelReindex()
             state.daysOpen -> vm.closeDays()

@@ -1,7 +1,9 @@
 package dev.vaultdrop
 
+import android.Manifest
 import android.app.Application
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
@@ -11,9 +13,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.text.TextRange
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.vaultdrop.core.AppConfig
+import dev.vaultdrop.core.AskReason
 import dev.vaultdrop.core.Attachments
 import dev.vaultdrop.core.ConfigStore
 import dev.vaultdrop.core.DailyNote
@@ -32,10 +36,14 @@ import dev.vaultdrop.core.VaultRepository
 import dev.vaultdrop.core.VaultSearch
 import dev.vaultdrop.core.VoiceChoice
 import dev.vaultdrop.core.VoiceEngine
+import dev.vaultdrop.core.VoiceEvent
+import dev.vaultdrop.core.VoiceFailure
+import dev.vaultdrop.core.VoiceOptions
 import dev.vaultdrop.core.WikiIndex
 import dev.vaultdrop.core.chooseVoice
 import dev.vaultdrop.core.dictationText
 import dev.vaultdrop.core.splice
+import dev.vaultdrop.voice.Dictation
 import dev.vaultdrop.voice.findVoiceOptions
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -57,7 +65,40 @@ enum class Screen { FirstRun, Verifying, Editor }
 enum class VoiceLaunch {
     /** Android's own voice input, `RECOGNIZE_SPEECH`. */
     Recognizer,
+
+    /** `RECORD_AUDIO`, the first time an Open Transcribe app is used. */
+    MicPermission,
 }
+
+/** The strip above the keyboard while an Open Transcribe app listens. */
+data class DictationUi(
+    /** The app doing the listening, as the launcher names it. */
+    val engine: String,
+    /** Everything heard so far. */
+    val heard: String = "",
+    /** Stop was pressed and the app is working through the end. */
+    val finishing: Boolean = false,
+)
+
+/** One row of the sheet that asks which app takes speech. */
+data class VoiceOption(
+    val engine: VoiceEngine,
+    val label: String,
+    val detail: String,
+    /** The app picked last time, still installed and signed as it was then. */
+    val current: Boolean,
+)
+
+data class VoicePicker(
+    val options: List<VoiceOption>,
+    /** Why the sheet is up, when it is not just the first time. */
+    val note: String?,
+    /** Raised by the mic, so picking starts listening; from the menu, picking only saves. */
+    val thenListen: Boolean,
+)
+
+/** An app the notice offers to open, for as long as [notice] is the one on screen. */
+data class NoticeApp(val label: String, val packageName: String, val notice: String)
 
 data class VerifyLine(val label: String, val value: String)
 
@@ -123,6 +164,8 @@ data class UiState(
     val linkCount: String = "",
     // Overlays
     val notice: String? = null,
+    /** Scrib with no speech model yet, say. See [NoticeApp]. */
+    val noticeApp: NoticeApp? = null,
     val daysOpen: Boolean = false,
     val days: List<DayRow> = emptyList(),
     val deleteOpen: Boolean = false,
@@ -139,6 +182,9 @@ data class UiState(
     /** A full-text scan is reading the vault right now. */
     val searchScanning: Boolean = false,
     val openedNote: IndexEntry? = null,
+    // Voice
+    val dictation: DictationUi? = null,
+    val voicePicker: VoicePicker? = null,
 )
 
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
@@ -750,31 +796,111 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     val voiceLaunches = Channel<VoiceLaunch>(Channel.BUFFERED)
 
-    /** The package queries behind a mic tap. */
+    /** The package queries behind a mic tap or the menu's Voice input…. */
     private var voiceQuery: Job? = null
 
     /** Android's recogniser is up, and this is waiting for what it heard. */
     private var recognized: CompletableDeferred<String?>? = null
 
+    /** The Open Transcribe dictation in progress, if any. */
+    private var dictation: Dictation? = null
+
+    /** An app picked for dictation, waiting on the answer to `RECORD_AUDIO`. */
+    private var awaitingMic: Transcribing? = null
+
+    /** An Open Transcribe app and the name the screen uses for it. */
+    private data class Transcribing(val engine: VoiceEngine.OpenTranscribe, val label: String)
+
     /**
      * The mic. Works out what can take speech, on IO and only now: package
      * queries are binder calls, and Phase 1 makes none. Then it uses the one
-     * answer, or says there is nothing to use; see [chooseVoice].
+     * answer, asks, or says there is nothing to use; see [chooseVoice].
      */
     fun onMic() {
         if (state.captureInFlight || voiceQuery?.isActive == true) return
         voiceQuery = viewModelScope.launch {
             val options = withContext(Dispatchers.IO) { findVoiceOptions(getApplication()) }
             when (val choice = chooseVoice(options, store.voiceEngine)) {
-                is VoiceChoice.Use -> when (choice.engine) {
-                    VoiceEngine.System -> recognize()
-                    is VoiceEngine.OpenTranscribe -> {}
-                }
-                is VoiceChoice.Ask -> {}
+                is VoiceChoice.Use -> use(choice.engine, labelFor(choice.engine, options))
+                is VoiceChoice.Ask -> askVoice(options, choice.reason, thenListen = true)
                 VoiceChoice.Unavailable -> state = state.copy(notice = NO_VOICE)
             }
         }
     }
+
+    /** Overflow: Voice input…. The same sheet, to change the pick without dictating. */
+    fun openVoicePicker() {
+        if (voiceQuery?.isActive == true) return
+        voiceQuery = viewModelScope.launch {
+            val options = withContext(Dispatchers.IO) { findVoiceOptions(getApplication()) }
+            if (options.transcribers.isEmpty() && !options.system) {
+                state = state.copy(notice = NO_VOICE)
+            } else {
+                askVoice(options, reason = null, thenListen = false)
+            }
+        }
+    }
+
+    private fun askVoice(options: VoiceOptions, reason: AskReason?, thenListen: Boolean) {
+        val stored = store.voiceEngine
+        val rows = options.transcribers.map { app ->
+            VoiceOption(
+                engine = app.engine,
+                label = app.label,
+                detail = "Open Transcribe · VaultDrop records, ${app.label} transcribes",
+                current = app.engine == stored,
+            )
+        } + listOfNotNull(
+            VoiceOption(
+                engine = VoiceEngine.System,
+                label = systemLabel(options),
+                detail = "Android's voice input · opens its own window",
+                current = stored == VoiceEngine.System,
+            ).takeIf { options.system },
+        )
+        val note = when (reason) {
+            AskReason.Changed -> {
+                val name = options.transcribers
+                    .firstOrNull { stored is VoiceEngine.OpenTranscribe && it.engine.sameService(stored) }
+                    ?.label ?: "The app picked before"
+                "$name is signed with a different key than the copy you picked. VaultDrop " +
+                    "hands this app your voice, so pick it again only if you trust where it came from."
+            }
+            AskReason.Gone -> "The app picked before is not installed any more."
+            AskReason.FirstTime, null -> null
+        }
+        state = state.copy(
+            voicePicker = VoicePicker(rows, note, thenListen),
+            daysOpen = false,
+            deleteOpen = false,
+        )
+    }
+
+    /** A row of the sheet. Remembered from now on, and used at once if the mic raised the sheet. */
+    fun pickVoice(option: VoiceOption) {
+        val picker = state.voicePicker ?: return
+        state = state.copy(voicePicker = null)
+        store.voiceEngine = option.engine
+        if (picker.thenListen && !state.captureInFlight) use(option.engine, option.label)
+    }
+
+    fun closeVoicePicker() {
+        state = state.copy(voicePicker = null)
+    }
+
+    private fun use(engine: VoiceEngine, label: String) = when (engine) {
+        VoiceEngine.System -> recognize()
+        is VoiceEngine.OpenTranscribe -> dictate(Transcribing(engine, label))
+    }
+
+    private fun labelFor(engine: VoiceEngine, options: VoiceOptions): String = when (engine) {
+        VoiceEngine.System -> systemLabel(options)
+        is VoiceEngine.OpenTranscribe ->
+            options.transcribers.firstOrNull { it.engine == engine }?.label ?: engine.packageName
+    }
+
+    private fun systemLabel(options: VoiceOptions): String =
+        options.systemLabel?.let { "Voice input ($it)" } ?: "System voice input"
 
     /**
      * Hands over to Android's voice input and waits for what it heard. The
@@ -819,6 +945,109 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun onRecognizerMissing() {
         recognized?.complete(null)
         state = state.copy(notice = NO_VOICE)
+    }
+
+    /**
+     * Listens through an Open Transcribe app until it settles. The microphone
+     * permission is asked for here, the first time it is needed, and never
+     * before.
+     *
+     * The note is pinned from the first word until the text lands, and the
+     * strip above the keyboard shows what has been heard so far.
+     */
+    private fun dictate(chosen: Transcribing) {
+        val app = getApplication<Application>()
+        if (ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            awaitingMic = chosen
+            voiceLaunches.trySend(VoiceLaunch.MicPermission)
+            return
+        }
+        val pin = pin() ?: return
+        val events = Channel<VoiceEvent>(Channel.UNLIMITED)
+        val session = Dictation.start(app, chosen.engine) { events.trySend(it) }
+        dictation = session
+        state = state.copy(dictation = DictationUi(chosen.label))
+        viewModelScope.launch {
+            try {
+                for (event in events) {
+                    when (event) {
+                        is VoiceEvent.Progress ->
+                            state.dictation?.let { state = state.copy(dictation = it.copy(heard = event.text)) }
+                        is VoiceEvent.Final -> {
+                            if (!land(pin, event.text) && isStillOpen(pin)) {
+                                state = state.copy(notice = "${chosen.label} heard nothing.")
+                            }
+                            break
+                        }
+                        is VoiceEvent.Failure -> {
+                            dictationFailed(pin, chosen, event.reason)
+                            break
+                        }
+                    }
+                }
+            } finally {
+                session.cancel() // nothing, once it has ended
+                if (dictation === session) dictation = null
+                state = state.copy(dictation = null)
+                unpin()
+            }
+        }
+    }
+
+    /** The answer to `RECORD_AUDIO`. */
+    fun onMicPermission(granted: Boolean) {
+        val waiting = awaitingMic ?: return
+        awaitingMic = null
+        if (granted) {
+            dictate(waiting)
+        } else {
+            state = state.copy(
+                notice = "VaultDrop needs the microphone to send your voice to ${waiting.label}. " +
+                    "Allow it in Android's settings for VaultDrop, or switch to system voice " +
+                    "input under Voice input… in the menu.",
+            )
+        }
+    }
+
+    /** The strip's Stop, and leaving the app. What was heard is still transcribed and still lands. */
+    fun stopDictation() {
+        val session = dictation ?: return
+        session.stop()
+        state.dictation?.let { state = state.copy(dictation = it.copy(finishing = true)) }
+    }
+
+    /** The strip's Cancel. Nothing lands. */
+    fun cancelDictation() {
+        dictation?.cancel()
+    }
+
+    /**
+     * Says why a dictation ended without its transcript. Whatever was heard
+     * before a failure is kept: it was said, and it was transcribed.
+     */
+    private fun dictationFailed(pin: Pin, chosen: Transcribing, reason: VoiceFailure) {
+        if (reason == VoiceFailure.Cancelled) return
+        val kept = state.dictation?.heard?.let { land(pin, it) } == true
+        val name = chosen.label
+        val why = when (reason) {
+            VoiceFailure.ModelNotReady -> "$name has no speech model yet. Open it to download one, then try the mic again."
+            VoiceFailure.Busy -> "$name is busy with something else. Try again in a moment."
+            VoiceFailure.Unreachable -> "Could not reach $name. Voice input… in the menu picks another app."
+            VoiceFailure.Died -> "$name stopped before it finished."
+            VoiceFailure.TimedOut -> "$name went quiet for three minutes, so VaultDrop stopped waiting."
+            VoiceFailure.Microphone -> "The microphone would not start. Another app may be using it."
+            is VoiceFailure.Engine -> "$name could not transcribe that" + (reason.message?.let { ": $it" } ?: ".")
+            VoiceFailure.Cancelled -> return
+        }
+        val notice = if (kept) "$why What it heard before that is in the note." else why
+        state = state.copy(
+            notice = notice,
+            noticeApp = if (reason == VoiceFailure.ModelNotReady) {
+                NoticeApp(name, chosen.engine.packageName, notice)
+            } else {
+                null
+            },
+        )
     }
 
     /**
@@ -1341,7 +1570,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     // ── Chrome ───────────────────────────────────────────────────────────────
 
     fun dismissNotice() {
-        state = state.copy(notice = null)
+        state = state.copy(notice = null, noticeApp = null)
     }
 
     /** Overflow: hand the vault back to the picker. */
