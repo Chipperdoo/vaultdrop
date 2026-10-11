@@ -63,6 +63,7 @@ fun VaultDropApp(vm: EditorViewModel) {
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri -> vm.onVaultPicked(uri) }
+    val photos = rememberPhotoCapture(vm)
 
     val recognizer = rememberLauncherForActivityResult(RecognizeSpeech()) { vm.onRecognized(it) }
 
@@ -126,6 +127,8 @@ fun VaultDropApp(vm: EditorViewModel) {
             onConfirmDelete = vm::confirmDelete,
             onCancelDelete = vm::cancelDelete,
             onMic = vm::onMic,
+            onTakePhoto = photos::takePhoto,
+            onChoosePhotos = photos::choosePhotos,
         )
     }
 

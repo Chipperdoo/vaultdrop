@@ -80,6 +80,8 @@ fun EditorScreen(
     onConfirmDelete: () -> Unit,
     onCancelDelete: () -> Unit,
     onMic: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onChoosePhotos: () -> Unit,
 ) {
     val c = MaterialTheme.colorScheme
     val drag = remember { Animatable(0f) }
@@ -229,11 +231,11 @@ fun EditorScreen(
             } else {
                 // Stays up while a capture holds the note, with its buttons off,
                 // so the row does not jump in and out under the thumb.
-                val capturing = state.captureInFlight
                 CaptureRow {
-                    CaptureButton(label = "Voice input", enabled = !capturing, onClick = onMic) {
-                        MicGlyph(barInk(!capturing))
-                    }
+                    val ready = !state.captureInFlight
+                    CaptureButton("Voice input", ready, onMic) { MicGlyph(barInk(ready)) }
+                    CaptureButton("Take a photo", ready, onTakePhoto) { CameraGlyph(barInk(ready)) }
+                    CaptureButton("Choose photos", ready, onChoosePhotos) { GalleryGlyph(barInk(ready)) }
                 }
             }
         }
