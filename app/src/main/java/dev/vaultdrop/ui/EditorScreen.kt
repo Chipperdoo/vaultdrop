@@ -42,6 +42,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextOverflow
@@ -49,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.LaunchedEffect
 import dev.vaultdrop.DayRow
 import dev.vaultdrop.UiState
+import dev.vaultdrop.VoiceOption
 import dev.vaultdrop.core.IndexEntry
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -56,7 +58,8 @@ import kotlin.math.min
 
 /**
  * Board 1a. The editor is the app: one Material line carrying the date, and the
- * note. No toolbar — everything else is raised by what you type or by the date.
+ * note. Below it, one slim row of capture buttons that gives way to the `[[`
+ * strip. Everything else is raised by what you type or by the date.
  */
 @Composable
 fun EditorScreen(
@@ -78,6 +81,16 @@ fun EditorScreen(
     onAskDelete: () -> Unit,
     onConfirmDelete: () -> Unit,
     onCancelDelete: () -> Unit,
+    onMic: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onChoosePhotos: () -> Unit,
+    onMicStop: () -> Unit,
+    onMicCancel: () -> Unit,
+    onMicPick: (VoiceOption) -> Unit,
+    onMicPickerClose: () -> Unit,
+    onMicSettings: () -> Unit,
+    /** Opens the app a notice names, by package. */
+    onMicOpenApp: (String) -> Unit,
 ) {
     val c = MaterialTheme.colorScheme
     val drag = remember { Animatable(0f) }
@@ -91,7 +104,7 @@ fun EditorScreen(
     // below. The confirmations need this as much as the sheet does: their
     // buttons sit low enough that an open keyboard hides the very choice they
     // are asking for.
-    val overlayOpen = state.daysOpen || state.deleteOpen || state.reindexOpen
+    val overlayOpen = state.daysOpen || state.deleteOpen || state.reindexOpen || state.voicePicker != null
     LaunchedEffect(overlayOpen) {
         if (overlayOpen) focusManager.clearFocus()
     }
@@ -115,6 +128,7 @@ fun EditorScreen(
                 created = state.created,
                 canGoPrev = state.canGoPrev,
                 canGoNext = state.canGoNext,
+                pinned = state.captureInFlight,
                 onOpenDays = onOpenDays,
                 onStepDay = onStepDay,
                 onOpenSearch = onOpenSearch,
@@ -122,6 +136,7 @@ fun EditorScreen(
                 onReloadConfig = onReloadConfig,
                 onAskReindex = onAskReindex,
                 onAskDelete = onAskDelete,
+                onVoiceInput = onMicSettings,
             )
 
             if (state.configMissing) {
@@ -141,7 +156,7 @@ fun EditorScreen(
                     .weight(1f)
                     .fillMaxWidth()
                     .daySwipe(
-                        enabled = !state.daysOpen,
+                        enabled = !state.daysOpen && !state.captureInFlight,
                         canGoForward = state.canGoNext,
                         canGoBack = state.canGoPrev,
                         onDrag = { scope.launch { drag.snapTo(it) } },
@@ -215,6 +230,10 @@ fun EditorScreen(
                 }
             }
 
+            // Sits above the `[[` strip rather than giving way to it, so Stop and
+            // Cancel stay in reach while a link is being typed.
+            state.dictation?.let { DictationStrip(it, onStop = onMicStop, onCancel = onMicCancel) }
+
             if (state.linkOpen) {
                 LinkStrip(
                     query = state.linkQuery,
@@ -223,6 +242,15 @@ fun EditorScreen(
                     matches = state.linkMatches,
                     onPick = onPickLink,
                 )
+            } else {
+                // Stays up while a capture holds the note, with its buttons off,
+                // so the row does not jump in and out under the thumb.
+                CaptureRow {
+                    val ready = !state.captureInFlight
+                    CaptureButton("Voice input", ready, onMic) { MicGlyph(barInk(ready)) }
+                    CaptureButton("Take a photo", ready, onTakePhoto) { CameraGlyph(barInk(ready)) }
+                    CaptureButton("Choose photos", ready, onChoosePhotos) { GalleryGlyph(barInk(ready)) }
+                }
             }
         }
 
@@ -269,14 +297,18 @@ fun EditorScreen(
         }
 
         state.notice?.let { notice ->
+            val app = state.noticeApp?.takeIf { it.notice == notice }
             NoticeBar(
                 text = notice,
                 onDismiss = onDismissNotice,
+                action = app?.let { "OPEN ${it.label.uppercase()}" },
+                onAction = { app?.let { onMicOpenApp(it.packageName) } },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .imePadding()
                     .navigationBarsPadding()
-                    .padding(start = 12.dp, end = 12.dp, bottom = 14.dp),
+                    // Clear of the capture row, so a notice never sits on its buttons.
+                    .padding(start = 12.dp, end = 12.dp, bottom = 14.dp + T.touch),
             )
         }
 
@@ -297,6 +329,8 @@ fun EditorScreen(
         if (state.reindexOpen) {
             ConfirmReindex(onConfirm = onConfirmReindex, onDismiss = onCancelReindex)
         }
+
+        state.voicePicker?.let { VoiceSheet(it, onPick = onMicPick, onDismiss = onMicPickerClose) }
     }
 }
 
@@ -328,6 +362,8 @@ private fun TopBar(
     created: Boolean,
     canGoPrev: Boolean,
     canGoNext: Boolean,
+    /** A capture holds the note on screen, so nothing here may leave it. */
+    pinned: Boolean,
     onOpenDays: () -> Unit,
     onStepDay: (Int) -> Unit,
     onOpenSearch: () -> Unit,
@@ -335,6 +371,7 @@ private fun TopBar(
     onReloadConfig: () -> Unit,
     onAskReindex: () -> Unit,
     onAskDelete: () -> Unit,
+    onVoiceInput: () -> Unit,
 ) {
     val c = MaterialTheme.colorScheme
     Row(
@@ -349,7 +386,7 @@ private fun TopBar(
             modifier = Modifier
                 .weight(1f)
                 .height(48.dp)
-                .clickable(onClick = onOpenDays),
+                .clickable(enabled = !pinned, onClick = onOpenDays),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -376,20 +413,24 @@ private fun TopBar(
             }
         }
 
-        BarButton(enabled = canGoPrev, onClick = { onStepDay(-1) }) {
-            Chevron(barInk(canGoPrev), pointsLeft = true)
+        val prev = canGoPrev && !pinned
+        val next = canGoNext && !pinned
+        BarButton(enabled = prev, onClick = { onStepDay(-1) }) {
+            Chevron(barInk(prev), pointsLeft = true)
         }
-        BarButton(enabled = canGoNext, onClick = { onStepDay(1) }) {
-            Chevron(barInk(canGoNext), pointsLeft = false)
+        BarButton(enabled = next, onClick = { onStepDay(1) }) {
+            Chevron(barInk(next), pointsLeft = false)
         }
         BarButton(enabled = true, onClick = onOpenSearch) {
             SearchGlyph(c.onSurface)
         }
         OverflowButton(
+            canDelete = !pinned,
             onChangeVault = onChangeVault,
             onReloadConfig = onReloadConfig,
             onAskReindex = onAskReindex,
             onAskDelete = onAskDelete,
+            onVoiceInput = onVoiceInput,
         )
     }
 }
@@ -414,10 +455,12 @@ private fun BarButton(enabled: Boolean, onClick: () -> Unit, icon: @Composable (
 
 @Composable
 private fun OverflowButton(
+    canDelete: Boolean,
     onChangeVault: () -> Unit,
     onReloadConfig: () -> Unit,
     onAskReindex: () -> Unit,
     onAskDelete: () -> Unit,
+    onVoiceInput: () -> Unit,
 ) {
     val c = MaterialTheme.colorScheme
     var open by remember { mutableStateOf(false) }
@@ -446,13 +489,21 @@ private fun OverflowButton(
                 onClick = { open = false; onAskReindex() },
             )
             DropdownMenuItem(
+                text = { Text("Voice input…", style = T.stripTitle) },
+                onClick = { open = false; onVoiceInput() },
+            )
+            DropdownMenuItem(
                 text = { Text("Change vault", style = T.stripTitle) },
                 onClick = { open = false; onChangeVault() },
             )
             // Last, and in the error ink: the only item here that moves a note.
+            // Disabled, it takes the menu's own disabled ink instead.
             DropdownMenuItem(
-                text = { Text("Delete note", style = T.stripTitle, color = c.error) },
+                text = {
+                    Text("Delete note", style = T.stripTitle, color = if (canDelete) c.error else Color.Unspecified)
+                },
                 onClick = { open = false; onAskDelete() },
+                enabled = canDelete,
             )
         }
     }

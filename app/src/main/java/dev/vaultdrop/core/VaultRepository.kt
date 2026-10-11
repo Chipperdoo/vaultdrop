@@ -1,6 +1,7 @@
 package dev.vaultdrop.core
 
 import android.net.Uri
+import java.io.InputStream
 import java.time.LocalDate
 import java.time.LocalDateTime
 
@@ -242,6 +243,43 @@ class VaultRepository(val files: VaultFiles) {
 
     fun exists(config: VaultConfig, date: LocalDate): Boolean =
         files.exists(DailyNote.resolve(config, date).relativePath)
+
+    // ── Attachments ──────────────────────────────────────────────────────────
+
+    /**
+     * Copies [source] into the vault as an attachment of the note at [note].
+     *
+     * [app] says where it goes. The caller probes `app.json` just before this,
+     * keeps what it finds the way it keeps every settings file, and passes it
+     * in, so the folder is what Obsidian says at the moment of writing rather
+     * than whenever the cache was last filled.
+     *
+     * [stem] and [ext] go through [Attachments.cleanName], and the file takes
+     * the first free name in that folder. A missing folder is made on the way,
+     * so the file lands where the setting says even before the folder has synced.
+     *
+     * A copy that fails part way takes the partial file back out, the same
+     * cleanup [trash] does, so a failure leaves nothing behind for the sync
+     * client. So does a provider that put the file somewhere other than where it
+     * was asked to; see [VaultFiles.isAt].
+     *
+     * @return the attachment's vault-relative path, or null if nothing was written.
+     */
+    fun attach(note: NotePath, stem: String, ext: String, source: InputStream, app: AppConfig): String? {
+        val name = Attachments.cleanName(stem) ?: return null
+        val extension = Attachments.cleanName(ext.removePrefix(".")).orEmpty()
+        val folder = Attachments.folderFor(app.attachmentFolder, note)
+        val fileName = Attachments.availableName(name, extension) {
+            files.exists(NotePath(folder, it).relativePath)
+        } ?: return null
+        val target = NotePath(folder, fileName)
+        val created = files.create(target, VaultFiles.mimeFor(extension)) ?: return null
+        if (!files.isAt(created, target.relativePath) || !files.copyInto(created, source)) {
+            files.delete(created)
+            return null
+        }
+        return target.relativePath
+    }
 
     // ── Phase 2: the walk ────────────────────────────────────────────────────
 

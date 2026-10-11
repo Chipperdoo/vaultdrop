@@ -1,7 +1,9 @@
 package dev.vaultdrop
 
+import android.Manifest
 import android.app.Application
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
@@ -11,9 +13,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.text.TextRange
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.vaultdrop.core.AppConfig
+import dev.vaultdrop.core.AskReason
+import dev.vaultdrop.core.Attachments
 import dev.vaultdrop.core.ConfigStore
 import dev.vaultdrop.core.DailyNote
 import dev.vaultdrop.core.DayIndex
@@ -21,26 +26,84 @@ import dev.vaultdrop.core.Hashing
 import dev.vaultdrop.core.IndexEntry
 import dev.vaultdrop.core.LinterConfig
 import dev.vaultdrop.core.LinkScan
+import dev.vaultdrop.core.NotePath
 import dev.vaultdrop.core.OpenNote
+import dev.vaultdrop.core.PhotoNames
 import dev.vaultdrop.core.SearchHit
+import dev.vaultdrop.core.Sharing
 import dev.vaultdrop.core.TrashOption
 import dev.vaultdrop.core.VaultConfig
 import dev.vaultdrop.core.VaultFiles
 import dev.vaultdrop.core.VaultRepository
 import dev.vaultdrop.core.VaultSearch
+import dev.vaultdrop.core.VoiceChoice
+import dev.vaultdrop.core.VoiceEngine
+import dev.vaultdrop.core.VoiceEvent
+import dev.vaultdrop.core.VoiceFailure
+import dev.vaultdrop.core.VoiceOptions
 import dev.vaultdrop.core.WikiIndex
+import dev.vaultdrop.core.chooseVoice
+import dev.vaultdrop.core.dictationText
+import dev.vaultdrop.core.splice
+import dev.vaultdrop.voice.Dictation
+import dev.vaultdrop.voice.findVoiceOptions
+import dev.vaultdrop.voice.transcribeFile
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.InputStream
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.Locale
 
 enum class Screen { FirstRun, Verifying, Editor }
+
+/** Something voice input needs that only the activity can start. */
+enum class VoiceLaunch {
+    /** Android's own voice input, `RECOGNIZE_SPEECH`. */
+    Recognizer,
+
+    /** `RECORD_AUDIO`, the first time an Open Transcribe app is used. */
+    MicPermission,
+}
+
+/** The strip above the keyboard while an Open Transcribe app listens. */
+data class DictationUi(
+    /** The app doing the listening, as the launcher names it. */
+    val engine: String,
+    /** Everything heard so far. */
+    val heard: String = "",
+    /** Stop was pressed and the app is working through the end. */
+    val finishing: Boolean = false,
+)
+
+/** One row of the sheet that asks which app takes speech. */
+data class VoiceOption(
+    val engine: VoiceEngine,
+    val label: String,
+    val detail: String,
+    /** The app picked last time, still installed and signed as it was then. */
+    val current: Boolean,
+)
+
+data class VoicePicker(
+    val options: List<VoiceOption>,
+    /** Why the sheet is up, when it is not just the first time. */
+    val note: String?,
+    /** Raised by the mic, so picking starts listening; from the menu, picking only saves. */
+    val thenListen: Boolean,
+)
+
+/** An app the notice offers to open, for as long as [notice] is the one on screen. */
+data class NoticeApp(val label: String, val packageName: String, val notice: String)
 
 data class VerifyLine(val label: String, val value: String)
 
@@ -57,6 +120,13 @@ data class DayRow(
      */
     val exists: Boolean?,
 )
+
+/**
+ * The note a capture started on, held from the moment it starts until what it
+ * captured lands. [EditorViewModel.isStillOpen] says whether that is still the
+ * note on screen.
+ */
+data class Pin(val generation: Int, val note: NotePath)
 
 data class UiState(
     val screen: Screen = Screen.FirstRun,
@@ -80,6 +150,12 @@ data class UiState(
     /** The day a step would land on, or null at that edge. */
     val prevDayLabel: String? = null,
     val nextDayLabel: String? = null,
+    /**
+     * A capture is working on the note on screen: a photo being copied in, a
+     * dictation being transcribed. Nothing that leaves the note works until it
+     * lands. See [EditorViewModel.pin].
+     */
+    val captureInFlight: Boolean = false,
     val configMissing: Boolean = false,
     val config: VaultConfig = VaultConfig(),
     // Phase 2
@@ -93,6 +169,8 @@ data class UiState(
     val linkCount: String = "",
     // Overlays
     val notice: String? = null,
+    /** Scrib with no speech model yet, say. See [NoticeApp]. */
+    val noticeApp: NoticeApp? = null,
     val daysOpen: Boolean = false,
     val days: List<DayRow> = emptyList(),
     val deleteOpen: Boolean = false,
@@ -109,6 +187,9 @@ data class UiState(
     /** A full-text scan is reading the vault right now. */
     val searchScanning: Boolean = false,
     val openedNote: IndexEntry? = null,
+    // Voice
+    val dictation: DictationUi? = null,
+    val voicePicker: VoicePicker? = null,
 )
 
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
@@ -156,9 +237,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * `.obsidian/app.json`. Picked up live like [linterConfig] and for the same
      * reason: it does not decide where a note lives, only what happens when one
-     * is deleted, so honouring a change straight away is what the user editing it
-     * in Obsidian would expect.
+     * is deleted and where an attachment goes, so honouring a change straight
+     * away is what the user editing it in Obsidian would expect.
+     *
+     * Written on IO by Phase 2, Reload config and every [attach], and read on
+     * the main thread by delete.
      */
+    @Volatile
     private var appConfig: AppConfig = AppConfig()
 
     /** The body as last written, so a save that would change nothing is skipped. */
@@ -197,6 +282,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var openJob: Job? = null
     private var openGeneration = 0
+
+    /** How many captures hold a [Pin] right now. Main thread only. */
+    private var pins = 0
+
+    /** Midnight went past while a capture held the note; the last [unpin] catches up. */
+    private var rollOverPending = false
 
     /** The day sheet's probes. One sheet's worth at a time. */
     private var dayProbeJob: Job? = null
@@ -365,6 +456,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 VerifyLine("template", config.template.ifEmpty { "none" }),
                 VerifyLine("linter", linterLine()),
                 VerifyLine("deleted files", trashLine()),
+                VerifyLine("attachments", attachmentLine()),
             )
             state = state.copy(
                 screen = Screen.Verifying,
@@ -389,6 +481,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun onVerifyContinue() {
         if (!state.verifyReady) return
         state = state.copy(screen = Screen.Editor)
+        deliverShares()
     }
 
     // ── Phase 2 ──────────────────────────────────────────────────────────────
@@ -499,13 +592,26 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             linterConfig = it
             store.saveLinter(it)
         }
-        // Same treatment, same reason: `trashOption` is read live so a change made
-        // in Obsidian applies to the next delete, not the next launch.
+        // Same treatment, same reason: `trashOption` and the attachment settings
+        // are read live so a change made in Obsidian applies to the next delete
+        // or attachment, not the next launch.
+        refreshAppConfig(repository)
+        return fresh
+    }
+
+    /**
+     * Probes `.obsidian/app.json` and adopts it if it moved. IO.
+     *
+     * Phase 2 and Reload config come through here, and so does every [attach]:
+     * resuming probes nothing, so a folder changed in Obsidian since then would
+     * otherwise send the next photo to the old one.
+     */
+    private fun refreshAppConfig(repository: VaultRepository): AppConfig {
         repository.appChangedSince(appConfig)?.let {
             appConfig = it
             store.saveApp(it)
         }
-        return fresh
+        return appConfig
     }
 
     // ── Editing ──────────────────────────────────────────────────────────────
@@ -610,6 +716,509 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ── Capturing ────────────────────────────────────────────────────────────
+
+    /**
+     * Holds the note on screen for a capture, until [unpin].
+     *
+     * A photo or a dictation that finishes after you have moved to another day
+     * would land in the wrong note. So while any capture holds a pin, the
+     * chevrons, the swipe, the day sheet and delete are off, and a rollover past
+     * midnight waits for the last one to let go. Every pin needs exactly one
+     * [unpin], however the capture ends.
+     *
+     * The note may still be being created when the capture starts. The pin
+     * holds the day rather than the [OpenNote], through [openGeneration], the
+     * same test [createDay] makes, so text that lands in that gap goes in after
+     * the template like anything else typed there.
+     *
+     * @return null when there is no note on screen to pin.
+     */
+    fun pin(): Pin? {
+        if (repo == null || state.screen != Screen.Editor) return null
+        pins++
+        state = state.copy(captureInFlight = true, daysOpen = false, deleteOpen = false)
+        return Pin(openGeneration, note?.path ?: DailyNote.resolve(activeConfig, openDate))
+    }
+
+    /** Lets go of one [pin]. The last one out turns leaving back on. */
+    fun unpin() {
+        if (pins == 0) return
+        if (--pins > 0) return
+        state = state.copy(captureInFlight = false)
+        if (rollOverPending) {
+            rollOverPending = false
+            rollOver()
+        }
+        deliverShares()
+    }
+
+    /** Whether [pin]'s note is still the one on screen. Check before splicing anything in. */
+    fun isStillOpen(pin: Pin): Boolean = pin.generation == openGeneration
+
+    /**
+     * Puts [insert] into the note at the caret, as a line of its own or as
+     * prose; see [splice]. Through the field's own buffer, like [insertLink], so
+     * the note is not copied around it, and autosave picks it up from there.
+     *
+     * The caret is the far end of any selection, so selected text stays.
+     */
+    fun insertAtCaret(insert: String, block: Boolean) {
+        val edit = splice(body.text, body.selection.max, insert, block)
+        if (edit.text.isEmpty()) return
+        body.edit {
+            replace(edit.start, edit.end, edit.text)
+            selection = TextRange(edit.caret)
+        }
+    }
+
+    /**
+     * Copies [source] into the vault as an attachment of [pin]'s note, and
+     * returns the embed for it. Null when nothing was written, including when
+     * the note is no longer on screen.
+     *
+     * `app.json` is probed first, every time; see [refreshAppConfig]. When the
+     * file has not moved that is one metadata query, and it means Obsidian's
+     * settings decide where the file goes at the moment it is written.
+     *
+     * Call from the main thread. The copy runs on IO. [source] is not closed
+     * here, and nothing is spliced: check [isStillOpen] again when this
+     * returns, then hand the embed to [insertAtCaret].
+     */
+    suspend fun attach(pin: Pin, stem: String, ext: String, source: InputStream): String? {
+        val repository = repo ?: return null
+        if (!isStillOpen(pin)) return null
+        return withContext(Dispatchers.IO) {
+            val app = refreshAppConfig(repository)
+            repository.attach(pin.note, stem, ext, source, app)?.let { Attachments.embed(it, pin.note, app) }
+        }
+    }
+
+    // ── Voice ────────────────────────────────────────────────────────────────
+
+    /**
+     * What voice input needs the activity to launch. A buffer rather than a
+     * field in [state], so a request made while the activity is being
+     * recreated waits for the new one instead of being lost or launched twice.
+     */
+    val voiceLaunches = Channel<VoiceLaunch>(Channel.BUFFERED)
+
+    /** The package queries behind a mic tap or the menu's Voice input…. */
+    private var voiceQuery: Job? = null
+
+    /** Android's recogniser is up, and this is waiting for what it heard. */
+    private var recognized: CompletableDeferred<String?>? = null
+
+    /** The Open Transcribe dictation in progress, if any. */
+    private var dictation: Dictation? = null
+
+    /** An app picked for dictation, waiting on the answer to `RECORD_AUDIO`. */
+    private var awaitingMic: Transcribing? = null
+
+    /** An Open Transcribe app and the name the screen uses for it. */
+    private data class Transcribing(val engine: VoiceEngine.OpenTranscribe, val label: String)
+
+    /**
+     * The mic. Works out what can take speech, on IO and only now: package
+     * queries are binder calls, and Phase 1 makes none. Then it uses the one
+     * answer, asks, or says there is nothing to use; see [chooseVoice].
+     */
+    fun onMic() {
+        if (state.captureInFlight || voiceQuery?.isActive == true) return
+        voiceQuery = viewModelScope.launch {
+            val options = withContext(Dispatchers.IO) { findVoiceOptions(getApplication()) }
+            when (val choice = chooseVoice(options, store.voiceEngine)) {
+                is VoiceChoice.Use -> use(choice.engine, labelFor(choice.engine, options))
+                is VoiceChoice.Ask -> askVoice(options, choice.reason, thenListen = true)
+                VoiceChoice.Unavailable -> state = state.copy(notice = NO_VOICE)
+            }
+        }
+    }
+
+    /** Overflow: Voice input…. The same sheet, to change the pick without dictating. */
+    fun openVoicePicker() {
+        if (voiceQuery?.isActive == true) return
+        voiceQuery = viewModelScope.launch {
+            val options = withContext(Dispatchers.IO) { findVoiceOptions(getApplication()) }
+            if (options.transcribers.isEmpty() && !options.system) {
+                state = state.copy(notice = NO_VOICE)
+            } else {
+                askVoice(options, reason = null, thenListen = false)
+            }
+        }
+    }
+
+    private fun askVoice(options: VoiceOptions, reason: AskReason?, thenListen: Boolean) {
+        val stored = store.voiceEngine
+        val rows = options.transcribers.map { app ->
+            VoiceOption(
+                engine = app.engine,
+                label = app.label,
+                detail = "Open Transcribe · VaultDrop records, ${app.label} transcribes",
+                current = app.engine == stored,
+            )
+        } + listOfNotNull(
+            VoiceOption(
+                engine = VoiceEngine.System,
+                label = systemLabel(options),
+                detail = "Android's voice input · opens its own window",
+                current = stored == VoiceEngine.System,
+            ).takeIf { options.system },
+        )
+        val note = when (reason) {
+            AskReason.Changed -> {
+                val name = options.transcribers
+                    .firstOrNull { stored is VoiceEngine.OpenTranscribe && it.engine.sameService(stored) }
+                    ?.label ?: "The app picked before"
+                "$name is signed with a different key than the copy you picked. VaultDrop " +
+                    "hands this app your voice, so pick it again only if you trust where it came from."
+            }
+            AskReason.Gone -> "The app picked before is not installed any more."
+            AskReason.FirstTime, null -> null
+        }
+        state = state.copy(
+            voicePicker = VoicePicker(rows, note, thenListen),
+            daysOpen = false,
+            deleteOpen = false,
+        )
+    }
+
+    /** A row of the sheet. Remembered from now on, and used at once if the mic raised the sheet. */
+    fun pickVoice(option: VoiceOption) {
+        val picker = state.voicePicker ?: return
+        state = state.copy(voicePicker = null)
+        store.voiceEngine = option.engine
+        if (picker.thenListen && !state.captureInFlight) use(option.engine, option.label)
+    }
+
+    fun closeVoicePicker() {
+        state = state.copy(voicePicker = null)
+    }
+
+    private fun use(engine: VoiceEngine, label: String) = when (engine) {
+        VoiceEngine.System -> recognize()
+        is VoiceEngine.OpenTranscribe -> dictate(Transcribing(engine, label))
+    }
+
+    private fun labelFor(engine: VoiceEngine, options: VoiceOptions): String = when (engine) {
+        VoiceEngine.System -> systemLabel(options)
+        is VoiceEngine.OpenTranscribe ->
+            options.transcribers.firstOrNull { it.engine == engine }?.label ?: engine.packageName
+    }
+
+    private fun systemLabel(options: VoiceOptions): String =
+        options.systemLabel?.let { "Voice input ($it)" } ?: "System voice input"
+
+    /**
+     * Hands over to Android's voice input and waits for what it heard. The
+     * note is pinned for as long as the recogniser's window is up, and
+     * `onPause` has saved it before that window appears.
+     */
+    private fun recognize() {
+        val pin = pin() ?: return
+        val heard = CompletableDeferred<String?>()
+        recognized = heard
+        viewModelScope.launch {
+            try {
+                voiceLaunches.send(VoiceLaunch.Recognizer)
+                heard.await()?.let { land(pin, it) }
+            } finally {
+                if (recognized === heard) recognized = null
+                unpin()
+            }
+        }
+    }
+
+    /** The recogniser's answer, or null when it was dismissed or heard nothing. */
+    fun onRecognized(text: String?) {
+        val waiting = recognized
+        if (waiting != null) {
+            waiting.complete(text)
+            return
+        }
+        // Nothing is waiting when Android killed the process behind the
+        // recogniser's window. The text still arrives, into whatever note the
+        // relaunch opened, rather than nowhere.
+        if (text == null) return
+        val pin = pin() ?: return
+        try {
+            land(pin, text)
+        } finally {
+            unpin()
+        }
+    }
+
+    /** No app took the intent after all; it was uninstalled since the tap looked. */
+    fun onRecognizerMissing() {
+        recognized?.complete(null)
+        state = state.copy(notice = NO_VOICE)
+    }
+
+    /**
+     * Listens through an Open Transcribe app until it settles. The microphone
+     * permission is asked for here, the first time it is needed, and never
+     * before.
+     *
+     * The note is pinned from the first word until the text lands, and the
+     * strip above the keyboard shows what has been heard so far.
+     */
+    private fun dictate(chosen: Transcribing) {
+        val app = getApplication<Application>()
+        if (ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            awaitingMic = chosen
+            voiceLaunches.trySend(VoiceLaunch.MicPermission)
+            return
+        }
+        val pin = pin() ?: return
+        val events = Channel<VoiceEvent>(Channel.UNLIMITED)
+        val session = Dictation.start(app, chosen.engine) { events.trySend(it) }
+        dictation = session
+        state = state.copy(dictation = DictationUi(chosen.label))
+        viewModelScope.launch {
+            try {
+                for (event in events) {
+                    when (event) {
+                        is VoiceEvent.Progress ->
+                            state.dictation?.let { state = state.copy(dictation = it.copy(heard = event.text)) }
+                        is VoiceEvent.Final -> {
+                            if (!land(pin, event.text) && isStillOpen(pin)) {
+                                state = state.copy(notice = "${chosen.label} heard nothing.")
+                            }
+                            break
+                        }
+                        is VoiceEvent.Failure -> {
+                            dictationFailed(pin, chosen, event.reason)
+                            break
+                        }
+                    }
+                }
+            } finally {
+                session.cancel() // nothing, once it has ended
+                if (dictation === session) dictation = null
+                state = state.copy(dictation = null)
+                unpin()
+            }
+        }
+    }
+
+    /** The answer to `RECORD_AUDIO`. */
+    fun onMicPermission(granted: Boolean) {
+        val waiting = awaitingMic ?: return
+        awaitingMic = null
+        if (granted) {
+            dictate(waiting)
+        } else {
+            state = state.copy(
+                notice = "VaultDrop needs the microphone to send your voice to ${waiting.label}. " +
+                    "Allow it in Android's settings for VaultDrop, or switch to system voice " +
+                    "input under Voice input… in the menu.",
+            )
+        }
+    }
+
+    /** The strip's Stop, and leaving the app. What was heard is still transcribed and still lands. */
+    fun stopDictation() {
+        val session = dictation ?: return
+        session.stop()
+        state.dictation?.let { state = state.copy(dictation = it.copy(finishing = true)) }
+    }
+
+    /** The strip's Cancel. Nothing lands. */
+    fun cancelDictation() {
+        dictation?.cancel()
+    }
+
+    /**
+     * Says why a dictation ended without its transcript. Whatever was heard
+     * before a failure is kept: it was said, and it was transcribed.
+     */
+    private fun dictationFailed(pin: Pin, chosen: Transcribing, reason: VoiceFailure) {
+        if (reason == VoiceFailure.Cancelled) return
+        val kept = state.dictation?.heard?.let { land(pin, it) } == true
+        val name = chosen.label
+        val why = when (reason) {
+            VoiceFailure.ModelNotReady -> "$name has no speech model yet. Open it to download one, then try the mic again."
+            VoiceFailure.Busy -> "$name is busy with something else. Try again in a moment."
+            VoiceFailure.Unreachable -> "Could not reach $name. Voice input… in the menu picks another app."
+            VoiceFailure.Died -> "$name stopped before it finished."
+            VoiceFailure.TimedOut -> "$name went quiet for three minutes, so VaultDrop stopped waiting."
+            VoiceFailure.Microphone -> "The microphone would not start. Another app may be using it."
+            is VoiceFailure.Engine -> "$name could not transcribe that" + (reason.message?.let { ": $it" } ?: ".")
+            VoiceFailure.Cancelled -> return
+        }
+        val notice = if (kept) "$why What it heard before that is in the note." else why
+        state = state.copy(
+            notice = notice,
+            noticeApp = if (reason == VoiceFailure.ModelNotReady) {
+                NoticeApp(name, chosen.engine.packageName, notice)
+            } else {
+                null
+            },
+        )
+    }
+
+    /**
+     * Splices what was heard into [pin]'s note as prose, if that is still the
+     * note on screen. False when nothing went in.
+     */
+    private fun land(pin: Pin, heard: String): Boolean {
+        if (!isStillOpen(pin)) return false
+        val text = dictationText(heard, body.text.getOrNull(body.selection.max))
+        if (text.isEmpty()) return false
+        insertAtCaret(text, block = false)
+        return true
+    }
+
+    // ── Photos ───────────────────────────────────────────────────────────────
+
+    /** The camera's cache file and the picker's photos. Not the vault; that is [VaultFiles]. */
+    private val photoFiles = PhotoFiles(app)
+
+    /** A camera capture out in the camera app: the note it belongs to, and the file being written. */
+    private var shot: Pair<Pin, File>? = null
+
+    /** The note a photo pick belongs to, while the picker is open. */
+    private var pickPin: Pin? = null
+
+    /**
+     * Gets the camera ready. Pins the note, then makes room for the file the
+     * camera app will write, and returns the URI to open it with. Null when
+     * there is nothing to pin, or when the camera can't be opened, with a
+     * notice saying why.
+     *
+     * The pin goes on before the camera opens, so the note can't change while
+     * you are in the camera app.
+     */
+    suspend fun startPhoto(): Uri? {
+        if (state.captureInFlight) return null
+        val pin = pin() ?: return null
+        var handedOff = false
+        try {
+            val (camera, target) = withContext(Dispatchers.IO) { photoFiles.hasCameraApp() to photoFiles.newShot() }
+            if (!camera || target == null) {
+                state = state.copy(notice = if (camera) "Could not open the camera." else NO_CAMERA)
+                return null
+            }
+            shot = pin to target.file
+            handedOff = true
+            return target.uri
+        } finally {
+            // Nothing will come back to unpin it: no camera, no file, or the
+            // tap's own coroutine cancelled on the way.
+            if (!handedOff) unpin()
+        }
+    }
+
+    /**
+     * The camera app is back. [saved] is false when it was backed out of.
+     *
+     * The cache file is deleted either way, copied or not. With no capture
+     * waiting, the process died while the camera was open. There is no pin to
+     * land the photo against, and the next [startPhoto] clears the file.
+     */
+    fun onPhotoTaken(saved: Boolean) {
+        val (pin, file) = shot ?: return
+        shot = null
+        viewModelScope.launch {
+            try {
+                if (!saved) return@launch
+                // A camera app can report success and write nothing. Going
+                // through the cache is what keeps that empty file out of the vault.
+                if (withContext(Dispatchers.IO) { file.length() } == 0L) {
+                    if (isStillOpen(pin)) state = state.copy(notice = "The camera app sent back no photo.")
+                    return@launch
+                }
+                val stem = PhotoNames.stamped(LocalDateTime.now())
+                val embed = attachFrom(pin, stem, PhotoNames.CAMERA_EXT) { photoFiles.open(file) }
+                if (!isStillOpen(pin)) return@launch
+                if (embed != null) insertAtCaret(embed, block = true)
+                else state = state.copy(notice = "Could not copy the photo into the vault.")
+            } finally {
+                withContext(NonCancellable + Dispatchers.IO) { file.delete() }
+                unpin()
+            }
+        }
+    }
+
+    /** Pins the note before the photo picker opens. False when there is nothing to pin; don't open it then. */
+    fun startChoosingPhotos(): Boolean {
+        if (state.captureInFlight) return false
+        pickPin = pin() ?: return false
+        return true
+    }
+
+    /**
+     * The picker is back with [uris] in the order they were picked, or with
+     * none when it was backed out of.
+     *
+     * They are copied in one after another straight away, because the picker's
+     * grants are temporary. Each embed goes in on a line of its own as its copy
+     * lands. A format Obsidian doesn't draw is copied all the same, and the
+     * notice says so.
+     */
+    fun onPhotosChosen(uris: List<Uri>) {
+        val pin = pickPin ?: return
+        pickPin = null
+        viewModelScope.launch {
+            try {
+                var failed = 0
+                val undrawn = sortedSetOf<String>()
+                for (uri in uris) {
+                    val name = withContext(Dispatchers.IO) { photoFiles.nameOf(uri, LocalDateTime.now()) }
+                    val embed = attachFrom(pin, name.stem, name.ext) { photoFiles.open(uri) }
+                    if (!isStillOpen(pin)) return@launch
+                    if (embed == null) {
+                        failed++
+                        continue
+                    }
+                    insertAtCaret(embed, block = true)
+                    if (!PhotoNames.rendersInObsidian(name.ext)) undrawn += name.ext.lowercase(Locale.ROOT)
+                }
+                photosNotice(failed, uris.size, undrawn)?.let { state = state.copy(notice = it) }
+            } finally {
+                unpin()
+            }
+        }
+    }
+
+    /** Nothing on the phone opened for the camera or the picker, so the pin taken for it comes off. */
+    fun onPhotoAppMissing() {
+        val camera = shot != null
+        if (!camera && pickPin == null) return
+        shot = null
+        pickPin = null
+        unpin()
+        state = state.copy(notice = if (camera) NO_CAMERA else "No photo picker on this phone.")
+    }
+
+    /**
+     * [attach] for a source this opens and closes itself, both on IO. Closing
+     * a provider's stream releases the provider, which can be a binder call,
+     * so that stays off the main thread too.
+     */
+    private suspend fun attachFrom(pin: Pin, stem: String, ext: String, open: () -> InputStream?): String? {
+        val source = withContext(Dispatchers.IO) { open() } ?: return null
+        try {
+            return attach(pin, stem, ext, source)
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) { runCatching { source.close() } }
+        }
+    }
+
+    /** What a pick has to report: photos that didn't copy, and formats Obsidian won't draw. Null for neither. */
+    private fun photosNotice(failed: Int, total: Int, undrawn: Set<String>): String? {
+        val formats = undrawn.joinToString(" or ") { if (it.isEmpty()) "files with no extension" else ".$it files" }
+        return when {
+            failed > 0 -> buildString {
+                append(if (total == 1) "Could not copy the photo" else "Could not copy $failed of $total photos")
+                append(" into the vault.")
+                if (undrawn.isNotEmpty()) append(" Obsidian does not display $formats.")
+            }
+            undrawn.isNotEmpty() -> "Copied, but Obsidian does not display $formats."
+            else -> null
+        }
+    }
+
     // ── Day navigation ───────────────────────────────────────────────────────
 
     /**
@@ -618,6 +1227,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * note gets made — tapping a day in the sheet is.
      */
     fun stepDay(direction: Int) {
+        if (state.captureInFlight) return
         val target = if (direction < 0) dayIndex?.before(openDate) else dayIndex?.after(openDate)
         if (target == null || target.isAfter(LocalDate.now())) return
         saveNow()
@@ -625,6 +1235,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun goToDate(date: LocalDate) {
+        if (state.captureInFlight) return
         saveNow()
         openDay(date, create = true, showCreatedNotice = true)
         state = state.copy(daysOpen = false)
@@ -684,6 +1295,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         openDate = date
         anchoredTo = LocalDate.now()
         body.clearText()
+        shareOpensGap = false
         state = state.copy(
             dateLabel = DailyNote.label(activeConfig, date),
             notePath = "",
@@ -741,7 +1353,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         anchoredTo = LocalDate.now()
 
         val typed = if (fromCreate) body.text.toString() else ""
-        body.setTextAndPlaceCursorAtEnd(if (typed.isEmpty()) opened.body else opened.body + typed)
+        // A share put into the gap goes after a blank line, like any share.
+        val gap = if (shareOpensGap) Sharing.separator(opened.body) else ""
+        shareOpensGap = false
+        body.setTextAndPlaceCursorAtEnd(if (typed.isEmpty()) opened.body else opened.body + gap + typed)
 
         state = state.copy(
             dateLabel = DailyNote.label(activeConfig, date),
@@ -819,6 +1434,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * once, the first time it matters, rather than every time or not at all.
      */
     fun askDelete() {
+        if (state.captureInFlight) return
         val fallback = appConfig.trash == TrashOption.System && !store.trashFallbackExplained
         if (fallback) store.trashFallbackExplained = true
         state = state.copy(
@@ -847,6 +1463,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun confirmDelete() {
         val repository = repo ?: return
         val current = note ?: return
+        if (state.captureInFlight) return
         val date = openDate
         note = null
         state = state.copy(deleteOpen = false)
@@ -916,6 +1533,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun openDays() {
         val repository = repo ?: return
+        if (state.captureInFlight) return
         val today = LocalDate.now()
         val known = dayIndex
         state = state.copy(
@@ -1113,7 +1731,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     // ── Chrome ───────────────────────────────────────────────────────────────
 
     fun dismissNotice() {
-        state = state.copy(notice = null)
+        state = state.copy(notice = null, noticeApp = null)
     }
 
     /** Overflow: hand the vault back to the picker. */
@@ -1125,6 +1743,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         linkJob?.cancel()
         openJob?.cancel()
         dayProbeJob?.cancel()
+        // A capture still working lands against a vault that has gone, and
+        // drops rather than writing into whichever vault is picked next.
+        openGeneration++
+        rollOverPending = false
         scannedQuery = null
         store.clear()
         WikiIndex.clear(getApplication<Application>())
@@ -1173,6 +1795,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         TrashOption.System -> "system trash → .trash/"
         TrashOption.Local -> ".trash/"
         TrashOption.None -> "delete permanently"
+    }
+
+    /** Where an attachment goes, in the shapes Obsidian's own setting offers. */
+    private fun attachmentLine(): String {
+        val setting = appConfig.attachmentFolder
+        // Resolved against a note at the root, which leaves just the setting's own folders.
+        val folder = Attachments.folderFor(setting, NotePath(emptyList(), "")).joinToString("/")
+        return when {
+            setting == "." || setting == "./" -> "the note's folder"
+            setting.startsWith("./") -> "$folder/ in the note's folder"
+            folder.isEmpty() -> "vault root"
+            else -> "$folder/"
+        }
     }
 
     /** What the verify screen says about the plugin, in the plugin's own terms. */
@@ -1237,6 +1872,196 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ── Sharing ──────────────────────────────────────────────────────────────
+
+    /**
+     * Shares the editor cannot take yet: one that came before a vault was
+     * picked, or while a capture held the note. Delivered in the order they came
+     * by [onVerifyContinue] and the last [unpin].
+     */
+    private val waitingShares = ArrayDeque<Share>()
+
+    /** Shared files whose share has been delivered, waiting for [attachSharedFiles]. */
+    private val pendingFiles = mutableListOf<SharedFile>()
+
+    /**
+     * The note on screen is still being created, and a share was the first
+     * thing put into it. [adopt] then puts a blank line between the template and
+     * the share, as every other share gets. Text typed into that gap still joins
+     * the template directly.
+     */
+    private var shareOpensGap = false
+
+    /** [leads] marks the first file of a share with no text, which starts at the end of the note. */
+    private data class SharedFile(val uri: Uri, val type: String?, val leads: Boolean)
+
+    /** A shared file in the vault. A recording keeps its name and type for the engine that transcribes it. */
+    private class Landed(val embed: String, val audio: Boolean, val name: String?, val mime: String?)
+
+    /**
+     * Another app shared something into VaultDrop: at launch, straight after
+     * [phase1], or into the running app from `onNewIntent`.
+     *
+     * It goes into today's note, at the end after a blank line, with the caret
+     * after it so a line of context can follow. Text goes in at once, so at
+     * launch it is in the first frame. Into a note still being created it goes
+     * into the field like typing, and [adopt] puts it after the template. Files
+     * are read from the sender once the editor is up; see [attachSharedFiles].
+     *
+     * A share that comes before a vault is picked waits through the picker and
+     * the verify screen, files included: the picker is another activity on top
+     * of this one, so the sender's grant is still good when the editor opens.
+     */
+    fun receiveShare(share: Share) {
+        waitingShares.addLast(share)
+        deliverShares()
+    }
+
+    /** Hands over every waiting share the editor can take now, oldest first. */
+    private fun deliverShares() {
+        while (waitingShares.isNotEmpty() && repo != null && state.screen == Screen.Editor && !state.captureInFlight) {
+            deliver(waitingShares.removeFirst())
+        }
+    }
+
+    /** Moves to today the way [goToDate] does, creating the note if it is missing, then puts [share] in. */
+    private fun deliver(share: Share) {
+        if (state.searchOpen) closeSearch()
+        state = state.copy(daysOpen = false, deleteOpen = false, reindexOpen = false)
+        val today = LocalDate.now()
+        if (openDate != today) {
+            saveNow()
+            openDay(today, create = true, showCreatedNotice = true)
+        }
+        share.text?.let { appendShared(it, block = false) }
+        share.files.forEachIndexed { i, uri ->
+            pendingFiles += SharedFile(uri, share.type, leads = i == 0 && share.text == null)
+        }
+        // phase2Started turns true with the editor's first frame. Until then the
+        // activity makes this call, from the effect that starts Phase 2.
+        if (phase2Started) attachSharedFiles()
+    }
+
+    /**
+     * [insert] at the end of the note, after a blank line, with the caret after
+     * it; see [Sharing.append]. Through the field's buffer, like [insertAtCaret].
+     */
+    private fun appendShared(insert: String, block: Boolean) {
+        if (note == null && body.text.isEmpty()) shareOpensGap = true
+        val edit = Sharing.append(body.text, insert, block)
+        body.edit {
+            replace(edit.start, edit.end, edit.text)
+            selection = TextRange(edit.caret)
+        }
+    }
+
+    /**
+     * Copies the shared files waiting in [pendingFiles] into the vault and
+     * embeds them, holding one [pin] for the lot.
+     *
+     * The activity calls this once the editor is up, next to [startPhase2], and
+     * [deliver] calls it after that. Asking the sender's provider for a name or
+     * a stream is a round trip into another app, so none of it happens before
+     * the first frame. The sender's grant only lasts as long as the activity,
+     * so it starts as soon as that frame is drawn.
+     *
+     * Each embed goes in at the caret, so a photo shared with a caption lands
+     * under the caption, and several land one per line in the order shared. A
+     * file with nothing ahead of it in its share starts at the end of the note
+     * after a blank line instead, as shared text does.
+     */
+    fun attachSharedFiles() {
+        if (pendingFiles.isEmpty()) return
+        val pin = pin() ?: return
+        val batch = pendingFiles.toList()
+        pendingFiles.clear()
+        viewModelScope.launch {
+            try {
+                var failed = 0
+                var leading = false
+                for (file in batch) {
+                    leading = leading || file.leads
+                    val landed = attachShared(pin, file)
+                    // Only Change vault moves the note while a pin is held, and
+                    // then there is no note left to say anything in.
+                    if (!isStillOpen(pin)) return@launch
+                    if (landed == null) {
+                        failed++
+                        continue
+                    }
+                    if (leading) appendShared(landed.embed, block = true) else insertAtCaret(landed.embed, block = true)
+                    leading = false
+                    if (landed.audio) {
+                        val transcript = transcribeShared(pin, file.uri, landed.name, landed.mime)
+                        if (transcript != null && isStillOpen(pin)) insertAtCaret(transcript, block = true)
+                    }
+                }
+                if (failed > 0) {
+                    state = state.copy(
+                        notice = if (batch.size == 1) {
+                            "Could not copy the shared file into the vault."
+                        } else {
+                            "Could not copy $failed of ${batch.size} shared files into the vault."
+                        },
+                    )
+                }
+            } finally {
+                unpin()
+            }
+        }
+    }
+
+    /**
+     * One shared file, named and copied through [attach]. Its name and type are
+     * the sender's to tell, asked here on IO and never on the launch path. The
+     * stream is opened and closed on IO by [attachFrom], as a photo's is.
+     */
+    private suspend fun attachShared(pin: Pin, file: SharedFile): Landed? {
+        val files = repo?.files ?: return null
+        val about = withContext(Dispatchers.IO) { files.describeShared(file.uri) }
+        val mime = about.mimeType ?: file.type
+        val name = Sharing.fileName(about.displayName, mime, LocalDateTime.now(), VaultFiles::extensionFor)
+        val audio = listOfNotNull(about.mimeType, file.type).any { it.startsWith("audio/") }
+        val embed = attachFrom(pin, name.stem, name.ext) { files.openShared(file.uri) } ?: return null
+        return Landed(embed, audio, about.displayName, mime)
+    }
+
+    /**
+     * The transcript of a shared recording, to go under its embed, or null to
+     * leave the recording on its own.
+     *
+     * Only an Open Transcribe app the user has already picked for the mic is
+     * used, and only while it is still installed under the same certificate:
+     * the contract has the user choose who gets their audio, and a share is no
+     * moment to ask. System voice input listens to the microphone and cannot
+     * be handed a file, so with that picked the recording stays as it is.
+     *
+     * [audio] is the sender's URI, readable only while the activity lives, so
+     * it is opened before the engine is bound. The pin is held until this
+     * returns, so the note cannot move under the transcript.
+     */
+    private suspend fun transcribeShared(pin: Pin, audio: Uri, fileName: String?, mimeType: String?): String? {
+        val stored = store.voiceEngine as? VoiceEngine.OpenTranscribe ?: return null
+        val app = getApplication<Application>()
+        val options = withContext(Dispatchers.IO) { findVoiceOptions(app) }
+        val engine = (chooseVoice(options, stored) as? VoiceChoice.Use)?.engine as? VoiceEngine.OpenTranscribe
+            ?: return null
+        val label = options.transcribers.firstOrNull { it.engine.sameService(engine) }?.label ?: engine.packageName
+        val fd = withContext(Dispatchers.IO) { repo?.files?.openSharedFile(audio) } ?: return null
+        val working = "$label is transcribing the recording…"
+        state = state.copy(notice = working)
+        val result = transcribeFile(app, engine, fd, fileName, mimeType)
+        if (state.notice == working) state = state.copy(notice = null)
+        return when (result) {
+            is VoiceEvent.Final -> dictationText(result.text, null).ifEmpty { null }
+            is VoiceEvent.Failure -> {
+                if (isStillOpen(pin)) dictationFailed(pin, Transcribing(engine, label), result.reason)
+                null
+            }
+            is VoiceEvent.Progress -> null
+        }
+    }
+
     // ── Coming back ──────────────────────────────────────────────────────────
 
     private var backgroundedAt = 0L
@@ -1273,6 +2098,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun rollOver() {
         if (repo == null || state.screen != Screen.Editor) return
+        // A capture still belongs to the note it started in; see [pin].
+        if (state.captureInFlight) {
+            rollOverPending = true
+            return
+        }
         val today = LocalDate.now()
         if (today == anchoredTo) return
         val wasOnLatest = openDate == anchoredTo
@@ -1284,6 +2114,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val WALKING = "Already walking the vault — this one will finish on its own."
+        const val NO_VOICE = "Nothing on this phone takes voice input. Scrib and FUTO Voice Input " +
+            "are both free on F-Droid. A keyboard's own mic types into the note as well."
+        const val NO_CAMERA = "No camera app is installed."
 
         /** Long enough that pausing to read a link or answer a message is not a rescan. */
         const val RESUME_REINDEX_AFTER_MS = 3 * 60 * 1000L

@@ -47,4 +47,62 @@ class AppConfigTest {
         assertEquals(42L, restored.lastModified)
         assertTrue(restored.present)
     }
+
+    // ── Attachments ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `reads a typical vault's attachment settings`() {
+        val config = parse(
+            """{"attachmentFolderPath":"Assets","useMarkdownLinks":false,"newLinkFormat":"shortest"}""",
+        )
+        assertEquals("Assets", config.attachmentFolder)
+        assertFalse(config.markdownLinks)
+        assertEquals(LinkFormat.Shortest, config.linkFormat)
+    }
+
+    @Test
+    fun `reads every link format and markdown links`() {
+        assertEquals(LinkFormat.Relative, parse("""{"newLinkFormat":"relative"}""").linkFormat)
+        assertEquals(LinkFormat.Absolute, parse("""{"newLinkFormat":"absolute"}""").linkFormat)
+        assertTrue(parse("""{"useMarkdownLinks":true}""").markdownLinks)
+    }
+
+    @Test
+    fun `missing attachment keys are Obsidian's defaults`() {
+        val config = parse("""{"trashOption":"local"}""")
+        assertEquals("/", config.attachmentFolder)
+        assertFalse(config.markdownLinks)
+        assertEquals(LinkFormat.Shortest, config.linkFormat)
+    }
+
+    @Test
+    fun `an unrecognised link format falls back to shortest`() {
+        assertEquals(LinkFormat.Shortest, parse("""{"newLinkFormat":"longest"}""").linkFormat)
+    }
+
+    @Test
+    fun `the attachment settings survive the round trip`() {
+        val original = parse(
+            """{"attachmentFolderPath":"./img","useMarkdownLinks":true,"newLinkFormat":"relative"}""",
+        ).copy(sha256 = "abc", lastModified = 42L)
+        val restored = AppConfig.fromCache(original.toJson())
+        assertEquals("./img", restored.attachmentFolder)
+        assertTrue(restored.markdownLinks)
+        assertEquals(LinkFormat.Relative, restored.linkFormat)
+        assertTrue(restored.present)
+        assertEquals(original, restored)
+    }
+
+    /**
+     * Its stamp still matches the file, so if it came back present the probe
+     * would call the file unchanged and photos would go to the vault root.
+     */
+    @Test
+    fun `a cache from before the attachment settings is read again`() {
+        val old = """{"trash":"local","present":true,"sha256":"abc","lastModified":42,"lastReadAt":7}"""
+        val restored = AppConfig.fromCache(old)
+        assertFalse(restored.present)
+        assertEquals(TrashOption.Local, restored.trash)
+        assertEquals("/", restored.attachmentFolder)
+    }
 }

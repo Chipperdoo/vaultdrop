@@ -18,6 +18,15 @@ android {
     }
 
     buildTypes {
+        // A debug build that installs next to the real one, with its own app id,
+        // name and settings, so a feature can be tried on the phone without
+        // touching the copy that points at the everyday vault.
+        create("preview") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".preview"
+            versionNameSuffix = "-preview"
+            matchingFallbacks += "debug"
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -29,7 +38,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        // Scrib's Open Transcribe contract is AIDL, which AGP 8 and later leave off.
+        aidl = true
+    }
 
     testOptions {
         unitTests.isReturnDefaultValues = true

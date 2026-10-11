@@ -1,5 +1,8 @@
 package dev.vaultdrop
 
+import android.Manifest
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -10,11 +13,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
 import dev.vaultdrop.ui.EditorScreen
 import dev.vaultdrop.ui.FirstRunScreen
 import dev.vaultdrop.ui.SearchScreen
 import dev.vaultdrop.ui.VerifyScreen
 import dev.vaultdrop.ui.theme.VaultDropTheme
+import dev.vaultdrop.voice.RecognizeSpeech
 
 class MainActivity : ComponentActivity() {
 
@@ -29,11 +34,23 @@ class MainActivity : ComponentActivity() {
         // filesystem operation on the critical path.
         vm.phase1()
 
+        // A share from another app is read off the intent, which is already in
+        // memory. Its text is in the first frame. Its files wait for the editor.
+        // A recreated activity has delivered its share already.
+        if (savedInstanceState == null) Share.from(intent)?.let(vm::receiveShare)
+
         setContent {
             VaultDropTheme {
                 VaultDropApp(vm)
             }
         }
+    }
+
+    /** A share into the running app. `singleTask` brings it here rather than to a second editor. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        Share.from(intent)?.let(vm::receiveShare)
     }
 
     /** Nothing in flight is lost on the way out. */
@@ -42,10 +59,19 @@ class MainActivity : ComponentActivity() {
         vm.saveNow()
     }
 
-    /** The two halves of "how long have we been away", for the resume reindex. */
+    /**
+     * The two halves of "how long have we been away", for the resume reindex.
+     *
+     * Leaving also closes the mic on a dictation. An app in the background
+     * cannot keep listening without a microphone foreground service, and this
+     * one has none, so the dictation stops the way the Stop button stops it:
+     * what was heard is still transcribed, and lands when it arrives. Turning
+     * the phone is not leaving, and the dictation carries on through it.
+     */
     override fun onStop() {
         super.onStop()
         vm.onBackgrounded()
+        if (!isChangingConfigurations) vm.stopDictation()
     }
 
     override fun onResume() {
@@ -61,6 +87,28 @@ fun VaultDropApp(vm: EditorViewModel) {
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri -> vm.onVaultPicked(uri) }
+    val photos = rememberPhotoCapture(vm)
+
+    val recognizer = rememberLauncherForActivityResult(RecognizeSpeech()) { vm.onRecognized(it) }
+    val micPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> vm.onMicPermission(granted) }
+    val context = LocalContext.current
+
+    // Voice input asks for what only an activity can start. Collected for as
+    // long as the activity lives; a request sent between two of them waits.
+    LaunchedEffect(Unit) {
+        for (launch in vm.voiceLaunches) {
+            when (launch) {
+                VoiceLaunch.Recognizer -> try {
+                    recognizer.launch(Unit)
+                } catch (_: ActivityNotFoundException) {
+                    vm.onRecognizerMissing()
+                }
+                VoiceLaunch.MicPermission -> micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        }
+    }
 
     when {
         state.screen == Screen.FirstRun -> FirstRunScreen(
@@ -107,18 +155,38 @@ fun VaultDropApp(vm: EditorViewModel) {
             onAskDelete = vm::askDelete,
             onConfirmDelete = vm::confirmDelete,
             onCancelDelete = vm::cancelDelete,
+            onMic = vm::onMic,
+            onTakePhoto = photos::takePhoto,
+            onChoosePhotos = photos::choosePhotos,
+            onMicStop = vm::stopDictation,
+            onMicCancel = vm::cancelDictation,
+            onMicPick = vm::pickVoice,
+            onMicPickerClose = vm::closeVoicePicker,
+            onMicSettings = vm::openVoicePicker,
+            onMicOpenApp = { packageName ->
+                vm.dismissNotice()
+                context.packageManager.getLaunchIntentForPackage(packageName)?.let {
+                    runCatching { context.startActivity(it) }
+                }
+            },
         )
     }
 
-    // Phase 2 begins only once the editor is up and the caret is live.
+    // Phase 2 begins only once the editor is up and the caret is live, and so
+    // does copying in any files that were shared at launch.
     LaunchedEffect(state.screen) {
-        if (state.screen == Screen.Editor) vm.startPhase2()
+        if (state.screen == Screen.Editor) {
+            vm.startPhase2()
+            vm.attachSharedFiles()
+        }
     }
 
     BackHandler(
-        enabled = state.daysOpen || state.searchOpen || state.deleteOpen || state.reindexOpen,
+        enabled = state.daysOpen || state.searchOpen || state.deleteOpen || state.reindexOpen ||
+            state.voicePicker != null,
     ) {
         when {
+            state.voicePicker != null -> vm.closeVoicePicker()
             state.deleteOpen -> vm.cancelDelete()
             state.reindexOpen -> vm.cancelReindex()
             state.daysOpen -> vm.closeDays()

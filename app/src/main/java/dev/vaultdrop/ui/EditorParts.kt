@@ -44,9 +44,10 @@ import dev.vaultdrop.core.TrashOption
 import dev.vaultdrop.core.VaultConfig
 
 /**
- * The `[[` strip. With no toolbar this is the wiki-link affordance, raised by
- * the characters you would have typed anyway — and it is where the Phase 2
- * index state lives, rather than in the chrome.
+ * The `[[` strip, in the capture row's place while a link is being typed. It is
+ * the wiki-link affordance, raised by the characters you would have typed
+ * anyway — and it is where the Phase 2 index state lives, rather than in the
+ * chrome.
  */
 @Composable
 fun LinkStrip(
@@ -136,9 +137,19 @@ private fun PulsingDot() {
     Box(Modifier.size(7.dp).alpha(alpha).clip(CircleShape).background(c.primary))
 }
 
-/** Phase 2 talking back — never blocking, always dismissible. */
+/**
+ * Phase 2 talking back: never blocking, always dismissible. [action], when
+ * there is one, offers the thing the notice is about, such as opening the app
+ * it names.
+ */
 @Composable
-fun NoticeBar(text: String, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+fun NoticeBar(
+    text: String,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+    action: String? = null,
+    onAction: () -> Unit = {},
+) {
     val c = MaterialTheme.colorScheme
     Row(
         modifier = modifier
@@ -150,6 +161,15 @@ fun NoticeBar(text: String, onDismiss: () -> Unit, modifier: Modifier = Modifier
         verticalAlignment = Alignment.Top,
     ) {
         Text(text, style = T.notice, color = c.onSurface.copy(alpha = 0.84f), modifier = Modifier.weight(1f))
+        if (action != null) {
+            Spacer(Modifier.width(12.dp))
+            Text(
+                action,
+                style = T.noticeAction,
+                color = c.primary,
+                modifier = Modifier.clickable(onClick = onAction).padding(horizontal = 2.dp),
+            )
+        }
         Spacer(Modifier.width(12.dp))
         Text(
             "OK",

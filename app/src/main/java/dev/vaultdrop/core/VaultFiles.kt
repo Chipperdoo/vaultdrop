@@ -3,8 +3,13 @@ package dev.vaultdrop.core
 import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
 import java.io.FileNotFoundException
+import java.io.InputStream
+import java.util.Locale
 
 /**
  * Thin SAF layer built on document-id arithmetic rather than `DocumentFile`.
@@ -77,15 +82,19 @@ class VaultFiles(context: Context, val treeUri: Uri) {
     /**
      * Creates the file, making any missing parent directories first.
      *
-     * Only ever called after a read has already failed, so this cannot clobber
-     * an existing note. Returns null if the provider refuses.
+     * Only ever called after a read or an exists check has come back empty, so
+     * this cannot clobber an existing file. Returns null if the provider refuses.
+     *
+     * [mime] has to agree with the name's extension, or the provider appends one
+     * of its own. Notes keep the Markdown default; an attachment passes
+     * [mimeFor] its extension.
      */
-    fun create(path: NotePath): Uri? {
+    fun create(path: NotePath, mime: String = MIME_MARKDOWN): Uri? {
         val parent = ensureDirectory(path.dirs) ?: return null
         return try {
             // "text/markdown" matters: with "text/plain" the provider would
             // rewrite the extension to .txt and Obsidian would stop seeing it.
-            DocumentsContract.createDocument(resolver, parent, MIME_MARKDOWN, path.fileName)
+            DocumentsContract.createDocument(resolver, parent, mime, path.fileName)
         } catch (_: Exception) {
             // Deliberately wide, as in ensureDirectory. DocumentsContract rethrows
             // whatever the provider raised — IllegalStateException("Failed to touch")
@@ -138,6 +147,86 @@ class VaultFiles(context: Context, val treeUri: Uri) {
         resolver.openOutputStream(uri, "wt")?.use { it.write(text.toByteArray(Charsets.UTF_8)) } != null
     } catch (_: Exception) {
         false
+    }
+
+    /**
+     * [write] for a file that is not text: [source] streamed in a buffer at a
+     * time, through the same truncating "wt". Does not close [source]; whoever
+     * opened it does.
+     */
+    fun copyInto(uri: Uri, source: InputStream): Boolean = try {
+        resolver.openOutputStream(uri, "wt")?.use { source.copyTo(it, COPY_BUFFER) } != null
+    } catch (_: Exception) {
+        false
+    }
+
+    /**
+     * Whether [uri] is the document at [relativePath].
+     *
+     * A provider can hand back something other than what it was asked to create:
+     * ` (1)` on a name that was taken in the meantime, or its own extension on a
+     * name its MIME table disagrees with. A link written to the name we asked for
+     * would then point at someone else's file, or at nothing.
+     */
+    fun isAt(uri: Uri, relativePath: String): Boolean =
+        runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull() == docIdFor(relativePath)
+
+    // ── Reading what another app shared ──────────────────────────────────────
+
+    /** What a shared file says about itself. Its provider may answer neither. */
+    data class Shared(val displayName: String?, val mimeType: String?)
+
+    /**
+     * The shared file's `DISPLAY_NAME` and type, from the app that shared it.
+     * Two round trips into that app's provider, so never on the launch path.
+     */
+    fun describeShared(uri: Uri): Shared {
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT) return Shared(null, null)
+        val name = try {
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getString(0) else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+        val mime = try {
+            resolver.getType(uri)
+        } catch (_: Exception) {
+            null
+        }
+        return Shared(name, mime)
+    }
+
+    /**
+     * Opens a shared file for reading, or null.
+     *
+     * Only `content:` URIs. A `file:` URI would be read with VaultDrop's own
+     * permissions, so any app could share `file:///data/data/dev.vaultdrop/…`
+     * and have VaultDrop copy its private files into the vault for the sync
+     * client to carry off.
+     */
+    fun openShared(uri: Uri): InputStream? {
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT) return null
+        return try {
+            resolver.openInputStream(uri)
+        } catch (_: Exception) {
+            // The sender's grant lapsed, or its provider refused: a file that
+            // cannot be copied, which the caller reports.
+            null
+        }
+    }
+
+    /**
+     * [openShared] as a descriptor, for a transcription engine that reads the
+     * file in its own process. Only `content:` URIs, for the same reason.
+     */
+    fun openSharedFile(uri: Uri): ParcelFileDescriptor? {
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT) return null
+        return try {
+            resolver.openFileDescriptor(uri, "r")
+        } catch (_: Exception) {
+            null
+        }
     }
 
     // ── Walking (Phase 2 only) ───────────────────────────────────────────────
@@ -211,6 +300,25 @@ class VaultFiles(context: Context, val treeUri: Uri) {
 
     companion object {
         const val MIME_MARKDOWN = "text/markdown"
+
+        /**
+         * The MIME type for a file ending in [ext], from `MimeTypeMap`: the table
+         * `ExternalStorageProvider` checks a new name against, so the two agree
+         * and the name is kept. An extension it does not know goes as
+         * `application/octet-stream`, which the provider also leaves alone.
+         */
+        fun mimeFor(ext: String): String =
+            MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.lowercase(Locale.ROOT)) ?: MIME_UNKNOWN
+
+        private const val MIME_UNKNOWN = "application/octet-stream"
+
+        /** [mimeFor] the other way round, for a shared file whose name has no extension. */
+        fun extensionFor(mime: String): String? =
+            MimeTypeMap.getSingleton().getExtensionFromMimeType(mime.lowercase(Locale.ROOT))
+
+        /** A 4 MB photo in 64 writes rather than the 512 the default buffer takes. */
+        private const val COPY_BUFFER = 64 * 1024
+
         const val OBSIDIAN_DIR = ".obsidian"
         const val CONFIG_PATH = ".obsidian/daily-notes.json"
     }

@@ -1,0 +1,4 @@
+<resources>
+    <!-- Tells the preview build apart from the real one in the launcher. -->
+    <string name="app_name">VaultDrop Preview</string>
+</resources>

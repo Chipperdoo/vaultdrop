@@ -27,9 +27,46 @@ you just need to write something down.
   `trashOption` setting.
 - **Stamps `date created` / `date modified`** if you use the Linter plugin,
   reading that plugin's own settings.
+- **Takes dictation** through the voice apps already on your phone. See
+  [Voice input](#voice-input).
+- **Adds photos** from your camera app or the photo picker. Each one is copied
+  into the folder your vault's own attachment setting names, and the note gets
+  the embed Obsidian would have written: `![[Photo 20261011143600.jpg]]` with
+  wikilinks, a Markdown link without.
+- **Takes shares** from any app. Text, photos and audio shared to VaultDrop go
+  at the end of today's note. A shared recording is transcribed under its embed
+  when you use Scrib for the mic.
 
 Nothing above is a VaultDrop preference. Every setting is one you already made
 in Obsidian, so a vault carried to another device behaves the same way there.
+
+## Voice input
+
+VaultDrop does no speech recognition of its own. It works with the voice apps
+you already have, in three ways:
+
+- **A voice keyboard.** The note is a plain text field, so a keyboard's mic
+  types straight into it: Gboard's, FUTO Keyboard's, Scrib's. Android's Voice
+  Access works too. There is nothing to set up.
+- **The mic above the keyboard** fires Android's own voice input
+  (`RECOGNIZE_SPEECH`). The app your phone uses for it shows its window and
+  listens, and the text goes in at the caret. Google, FUTO Voice Input,
+  Transcribro and Kõnele all answer it. If several do, Android asks which one
+  and remembers. VaultDrop needs no microphone permission for this.
+- **Scrib** doesn't answer that intent. It speaks its own
+  [Open Transcribe](https://github.com/23rd/Scrib/blob/main/CONTRACT.md)
+  contract instead, and the same mic speaks it too: VaultDrop records, Scrib
+  transcribes on the phone, and the text shows in a strip above the keyboard as
+  you talk. Press Stop and it goes in at the caret. This is the one path that
+  needs the microphone permission, and VaultDrop asks for it the first time you
+  use it. Leaving the app stops the recording, and the text still lands when
+  Scrib is done. The audio is not kept.
+
+If an Open Transcribe app is installed, the first tap asks which app to use,
+and remembers. Voice input… in the menu changes it. VaultDrop also remembers the
+certificate the app was signed with, and asks again if that ever changes,
+because the app it picked is the one hearing your voice. With no voice app
+installed, the mic says so and names two free ones on F-Droid.
 
 ## Requirements
 
