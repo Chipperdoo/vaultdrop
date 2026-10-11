@@ -18,6 +18,15 @@ android {
     }
 
     buildTypes {
+        // A debug build that installs next to the real one, with its own app id,
+        // name and settings, so a feature can be tried on the phone without
+        // touching the copy that points at the everyday vault.
+        create("preview") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".preview"
+            versionNameSuffix = "-preview"
+            matchingFallbacks += "debug"
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
