@@ -8,6 +8,7 @@ Guidance for coding agents working in this repository. Human-facing docs are in
 ```bash
 ./gradlew :app:assembleDebug                 # build
 ./gradlew :app:installDebug                  # build and install on a connected device
+./gradlew :app:installPreview                # same, as dev.vaultdrop.preview, beside the real app
 ./gradlew :app:testDebugUnitTest             # all unit tests
 ./gradlew :app:lintDebug                     # Android Lint
 ```
@@ -33,7 +34,8 @@ overlay booleans, and passes method references down. Composables never touch
 ```
 MainActivity ──> EditorViewModel ──> VaultRepository ──> VaultFiles ──> SAF
                       │                                                (DocumentsContract)
-                      └──> ConfigStore (SharedPreferences)
+                      ├──> ConfigStore (SharedPreferences)
+                      └──> voice/ ──> Open Transcribe engine (binder), AudioRecord
 ```
 
 `ui/` is presentation only. `core/` is where the logic lives, and almost all of
@@ -137,6 +139,45 @@ loop — the config's own share of the work is hoisted out. `DailyLayout.resolve
 is derived from `DailyLayout.relativePath` so the two cannot disagree, and
 `DailyNoteTest` pins them together across every format and folder shape.
 
+### Captures hand off to apps already on the phone
+
+The row above the keyboard (mic, camera, gallery) and Android's share sheet are
+the ways in. VaultDrop records, recognises and photographs nothing itself: it
+hands off to the phone's own apps and copies what comes back into the vault.
+`docs/plans/multimedia.md` has the reasoning.
+
+- **Every capture pins the note.** `pin()` before leaving the app for a camera,
+  picker or recogniser, `isStillOpen(pin)` before splicing, and `unpin()` in a
+  `finally`, exactly once. Pins count. While one is held, day navigation, the
+  day sheet, delete and `rollOver` wait, and shares queue until the last unpin.
+- **`attach` re-reads `app.json` every time**, because resuming probes nothing.
+  Folder, link style and link format come out of `Attachments`, from Obsidian's
+  own keys.
+- **An attachment's MIME comes from `VaultFiles.mimeFor(ext)`.** The provider
+  renames a file whose MIME and extension disagree, and `isAt` deletes the file
+  rather than embed a name that is not on disk.
+- **Shares are read at launch from memory only.** `onCreate` takes the text out
+  of the intent's extras after `phase1()`, so it is in the first frame. Asking
+  the sender for a name, a type or a stream waits for `attachSharedFiles`,
+  which runs from the same effect as `startPhase2`. Only `content:` URIs are
+  opened: a `file:` URI would read with VaultDrop's own permissions. The
+  `FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY` check is what keeps Recents from
+  appending the same share twice.
+- **The camera is the phone's own app**, through `ACTION_IMAGE_CAPTURE` into
+  `cache/capture/`. The manifest declares no `CAMERA` permission: declaring it
+  without holding it makes Android refuse that intent.
+- **Build authorities from the application ID** (`${applicationId}.fileprovider`,
+  `context.packageName`). The preview build installs beside the real one under
+  another ID.
+- **`PhotoFiles` is the one storage class outside `VaultFiles`**, for the
+  camera's cache file and the picker's URIs. It never touches the vault. The view
+  model builds it before Phase 1, so its constructor reads nothing.
+- **`voice/` is the only place that touches binder and audio APIs.** It binds
+  only the Open Transcribe app the user picked, pinned to its signing-cert
+  SHA-256. `findVoiceOptions` runs on a tap, on IO. Dictation audio is never
+  kept. The `org/opentranscribe/api` AIDL files are Scrib's, copied unchanged,
+  because their package is the binder descriptor.
+
 ## Invariants that protect user data
 
 These are load-bearing. Tests exist for most of them.
@@ -178,6 +219,11 @@ rather than cancelling a job; `saveNow` stops there.
 `index` is `@Volatile`: written by the walk on IO, read by search and link jobs
 off it. Jobs snapshot it into a local before suspending.
 
+Open Transcribe callbacks arrive on binder threads, and `EngineLink` posts them
+to main. Calls into the engine block, so they run on the link's worker thread.
+The mic has a capture thread and a sender thread with a queue between them,
+because `write` blocks while the engine catches up.
+
 ## Gotchas
 
 - **`TemplateEngine.VARIABLE` escapes both closing braces.** Android's regex is
@@ -192,5 +238,9 @@ off it. Jobs snapshot it into a local before suspending.
 - **`String.foldCase()` (in `WikiIndex.kt`) is char-for-char**, unlike
   `lowercase()`, which changes length for some codepoints and would slide snippet
   offsets onto the wrong text.
+- **`ConfigStore.clear()` keeps `voice_engine`.** Which voice app was picked is a
+  fact about the phone, so it survives a change of vault.
+- **`onStop` stops a dictation, except on rotation.** The text still lands when
+  the engine finishes.
 - **`TrashOption.System` cannot be honoured.** Android exposes no trash call to a
   folder-grant app, so it falls back to `.trash/` and the UI says so once.

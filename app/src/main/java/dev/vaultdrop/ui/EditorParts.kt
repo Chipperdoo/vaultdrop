@@ -44,9 +44,10 @@ import dev.vaultdrop.core.TrashOption
 import dev.vaultdrop.core.VaultConfig
 
 /**
- * The `[[` strip. With no toolbar this is the wiki-link affordance, raised by
- * the characters you would have typed anyway — and it is where the Phase 2
- * index state lives, rather than in the chrome.
+ * The `[[` strip, in the capture row's place while a link is being typed. It is
+ * the wiki-link affordance, raised by the characters you would have typed
+ * anyway — and it is where the Phase 2 index state lives, rather than in the
+ * chrome.
  */
 @Composable
 fun LinkStrip(

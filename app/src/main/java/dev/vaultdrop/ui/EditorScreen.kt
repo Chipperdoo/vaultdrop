@@ -58,7 +58,8 @@ import kotlin.math.min
 
 /**
  * Board 1a. The editor is the app: one Material line carrying the date, and the
- * note. No toolbar — everything else is raised by what you type or by the date.
+ * note. Below it, one slim row of capture buttons that gives way to the `[[`
+ * strip. Everything else is raised by what you type or by the date.
  */
 @Composable
 fun EditorScreen(

@@ -29,6 +29,13 @@ you just need to write something down.
   reading that plugin's own settings.
 - **Takes dictation** through the voice apps already on your phone. See
   [Voice input](#voice-input).
+- **Adds photos** from your camera app or the photo picker. Each one is copied
+  into the folder your vault's own attachment setting names, and the note gets
+  the embed Obsidian would have written: `![[Photo 20261011143600.jpg]]` with
+  wikilinks, a Markdown link without.
+- **Takes shares** from any app. Text, photos and audio shared to VaultDrop go
+  at the end of today's note. A shared recording is transcribed under its embed
+  when you use Scrib for the mic.
 
 Nothing above is a VaultDrop preference. Every setting is one you already made
 in Obsidian, so a vault carried to another device behaves the same way there.

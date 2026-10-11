@@ -1,6 +1,9 @@
 # Plan: voice and photos
 
-Status: plan only. Nothing here is built yet.
+Status: built, all four tracks, and not yet run end to end on a device. What
+is still open is under [Checks against desktop Obsidian](#checks-against-desktop-obsidian)
+and [Open questions](#open-questions). The build follows the recommendation
+for each open question until it is answered.
 
 VaultDrop takes text and nothing else. You can't photograph the thing you
 wanted to remember, and you can't talk when typing is awkward, so the app gets
