@@ -1,5 +1,6 @@
 package dev.vaultdrop
 
+import android.content.ActivityNotFoundException
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -15,6 +16,7 @@ import dev.vaultdrop.ui.FirstRunScreen
 import dev.vaultdrop.ui.SearchScreen
 import dev.vaultdrop.ui.VerifyScreen
 import dev.vaultdrop.ui.theme.VaultDropTheme
+import dev.vaultdrop.voice.RecognizeSpeech
 
 class MainActivity : ComponentActivity() {
 
@@ -62,6 +64,22 @@ fun VaultDropApp(vm: EditorViewModel) {
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri -> vm.onVaultPicked(uri) }
 
+    val recognizer = rememberLauncherForActivityResult(RecognizeSpeech()) { vm.onRecognized(it) }
+
+    // Voice input asks for what only an activity can start. Collected for as
+    // long as the activity lives; a request sent between two of them waits.
+    LaunchedEffect(Unit) {
+        for (launch in vm.voiceLaunches) {
+            when (launch) {
+                VoiceLaunch.Recognizer -> try {
+                    recognizer.launch(Unit)
+                } catch (_: ActivityNotFoundException) {
+                    vm.onRecognizerMissing()
+                }
+            }
+        }
+    }
+
     when {
         state.screen == Screen.FirstRun -> FirstRunScreen(
             errorTitle = state.vaultErrorTitle,
@@ -107,6 +125,7 @@ fun VaultDropApp(vm: EditorViewModel) {
             onAskDelete = vm::askDelete,
             onConfirmDelete = vm::confirmDelete,
             onCancelDelete = vm::cancelDelete,
+            onMic = vm::onMic,
         )
     }
 

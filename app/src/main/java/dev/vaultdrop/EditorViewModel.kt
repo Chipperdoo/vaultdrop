@@ -30,10 +30,17 @@ import dev.vaultdrop.core.VaultConfig
 import dev.vaultdrop.core.VaultFiles
 import dev.vaultdrop.core.VaultRepository
 import dev.vaultdrop.core.VaultSearch
+import dev.vaultdrop.core.VoiceChoice
+import dev.vaultdrop.core.VoiceEngine
 import dev.vaultdrop.core.WikiIndex
+import dev.vaultdrop.core.chooseVoice
+import dev.vaultdrop.core.dictationText
 import dev.vaultdrop.core.splice
+import dev.vaultdrop.voice.findVoiceOptions
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
@@ -45,6 +52,12 @@ import java.time.LocalDateTime
 import java.util.Locale
 
 enum class Screen { FirstRun, Verifying, Editor }
+
+/** Something voice input needs that only the activity can start. */
+enum class VoiceLaunch {
+    /** Android's own voice input, `RECOGNIZE_SPEECH`. */
+    Recognizer,
+}
 
 data class VerifyLine(val label: String, val value: String)
 
@@ -726,6 +739,98 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val app = refreshAppConfig(repository)
             repository.attach(pin.note, stem, ext, source, app)?.let { Attachments.embed(it, pin.note, app) }
         }
+    }
+
+    // ── Voice ────────────────────────────────────────────────────────────────
+
+    /**
+     * What voice input needs the activity to launch. A buffer rather than a
+     * field in [state], so a request made while the activity is being
+     * recreated waits for the new one instead of being lost or launched twice.
+     */
+    val voiceLaunches = Channel<VoiceLaunch>(Channel.BUFFERED)
+
+    /** The package queries behind a mic tap. */
+    private var voiceQuery: Job? = null
+
+    /** Android's recogniser is up, and this is waiting for what it heard. */
+    private var recognized: CompletableDeferred<String?>? = null
+
+    /**
+     * The mic. Works out what can take speech, on IO and only now: package
+     * queries are binder calls, and Phase 1 makes none. Then it uses the one
+     * answer, or says there is nothing to use; see [chooseVoice].
+     */
+    fun onMic() {
+        if (state.captureInFlight || voiceQuery?.isActive == true) return
+        voiceQuery = viewModelScope.launch {
+            val options = withContext(Dispatchers.IO) { findVoiceOptions(getApplication()) }
+            when (val choice = chooseVoice(options, store.voiceEngine)) {
+                is VoiceChoice.Use -> when (choice.engine) {
+                    VoiceEngine.System -> recognize()
+                    is VoiceEngine.OpenTranscribe -> {}
+                }
+                is VoiceChoice.Ask -> {}
+                VoiceChoice.Unavailable -> state = state.copy(notice = NO_VOICE)
+            }
+        }
+    }
+
+    /**
+     * Hands over to Android's voice input and waits for what it heard. The
+     * note is pinned for as long as the recogniser's window is up, and
+     * `onPause` has saved it before that window appears.
+     */
+    private fun recognize() {
+        val pin = pin() ?: return
+        val heard = CompletableDeferred<String?>()
+        recognized = heard
+        viewModelScope.launch {
+            try {
+                voiceLaunches.send(VoiceLaunch.Recognizer)
+                heard.await()?.let { land(pin, it) }
+            } finally {
+                if (recognized === heard) recognized = null
+                unpin()
+            }
+        }
+    }
+
+    /** The recogniser's answer, or null when it was dismissed or heard nothing. */
+    fun onRecognized(text: String?) {
+        val waiting = recognized
+        if (waiting != null) {
+            waiting.complete(text)
+            return
+        }
+        // Nothing is waiting when Android killed the process behind the
+        // recogniser's window. The text still arrives, into whatever note the
+        // relaunch opened, rather than nowhere.
+        if (text == null) return
+        val pin = pin() ?: return
+        try {
+            land(pin, text)
+        } finally {
+            unpin()
+        }
+    }
+
+    /** No app took the intent after all; it was uninstalled since the tap looked. */
+    fun onRecognizerMissing() {
+        recognized?.complete(null)
+        state = state.copy(notice = NO_VOICE)
+    }
+
+    /**
+     * Splices what was heard into [pin]'s note as prose, if that is still the
+     * note on screen. False when nothing went in.
+     */
+    private fun land(pin: Pin, heard: String): Boolean {
+        if (!isStillOpen(pin)) return false
+        val text = dictationText(heard, body.text.getOrNull(body.selection.max))
+        if (text.isEmpty()) return false
+        insertAtCaret(text, block = false)
+        return true
     }
 
     // ── Day navigation ───────────────────────────────────────────────────────
@@ -1429,6 +1534,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val WALKING = "Already walking the vault — this one will finish on its own."
+        const val NO_VOICE = "Nothing on this phone takes voice input. Scrib and FUTO Voice Input " +
+            "are both free on F-Droid. A keyboard's own mic types into the note as well."
 
         /** Long enough that pausing to read a link or answer a message is not a rescan. */
         const val RESUME_REINDEX_AFTER_MS = 3 * 60 * 1000L
