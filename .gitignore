@@ -27,6 +27,7 @@ captures/
 # Signing material
 *.jks
 *.keystore
+*.p12
 
 # OS
 .DS_Store

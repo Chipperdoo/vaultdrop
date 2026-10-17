@@ -68,6 +68,22 @@ certificate the app was signed with, and asks again if that ever changes,
 because the app it picked is the one hearing your voice. With no voice app
 installed, the mic says so and names two free ones on F-Droid.
 
+## Install
+
+Test builds are on the [Releases](https://github.com/Chipperdoo/vaultdrop/releases)
+page. Download the APK on your phone and open it. Android asks once whether your
+browser or file manager may install apps. VaultDrop needs Android 8.0 or newer.
+
+Every release is signed with the same key, so a new version installs over the
+old one and keeps your settings. The signing certificate's SHA-256 is:
+
+```
+AD:98:B3:60:A6:C8:9F:F7:68:31:3C:EB:CF:57:85:78:70:9B:B8:85:EC:97:E5:ED:C9:3F:1C:B5:92:C9:82:FA
+```
+
+Found a bug? [Open an issue](https://github.com/Chipperdoo/vaultdrop/issues/new?template=bug_report.yml)
+and say which phone, which Android version, and how your vault gets onto it.
+
 ## Requirements
 
 JDK 17 and the Android SDK. The app builds against `compileSdk 37`, targets

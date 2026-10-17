@@ -14,7 +14,21 @@ android {
         minSdk = 26
         targetSdk = 37
         versionCode = 1
-        versionName = "1.0"
+        versionName = "0.1.0"
+    }
+
+    // Release signing lives outside the repo, in ~/.gradle/gradle.properties or as
+    // ORG_GRADLE_PROJECT_vaultdrop* variables in CI. Without it assembleRelease
+    // still runs, and leaves the APK unsigned.
+    val releaseStore = providers.gradleProperty("vaultdropStoreFile").orNull
+    signingConfigs {
+        if (releaseStore != null) create("release") {
+            storeFile = file(releaseStore)
+            storePassword = providers.gradleProperty("vaultdropStorePassword").get()
+            keyAlias = providers.gradleProperty("vaultdropKeyAlias").get()
+            // A PKCS12 keystore has one password for the store and the key.
+            keyPassword = providers.gradleProperty("vaultdropKeyPassword").orNull ?: storePassword
+        }
     }
 
     buildTypes {
@@ -28,6 +42,7 @@ android {
             matchingFallbacks += "debug"
         }
         release {
+            signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

@@ -1,0 +1,62 @@
+name: Bug report
+description: Something went wrong, or looked wrong.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. Issues are public, so leave out anything private from
+        your notes. Crop screenshots down to the problem.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: And what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen again
+      placeholder: |
+        1. Open VaultDrop
+        2. ...
+  - type: input
+    id: version
+    attributes:
+      label: VaultDrop version
+      description: The release you downloaded.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: phone
+    attributes:
+      label: Phone model
+      placeholder: Samsung Galaxy S23
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Android version
+      placeholder: Android 15
+    validations:
+      required: true
+  - type: dropdown
+    id: sync
+    attributes:
+      label: How does your vault get onto the phone?
+      options:
+        - Obsidian Sync
+        - Syncthing
+        - FolderSync, Autosync or another sync app
+        - It only lives on the phone
+        - Something else (say below)
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Which voice app or camera app you use, or anything unusual about your vault.

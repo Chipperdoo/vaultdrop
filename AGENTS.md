@@ -11,6 +11,7 @@ Guidance for coding agents working in this repository. Human-facing docs are in
 ./gradlew :app:installPreview                # same, as dev.vaultdrop.preview, beside the real app
 ./gradlew :app:testDebugUnitTest             # all unit tests
 ./gradlew :app:lintDebug                     # Android Lint
+./gradlew :app:assembleRelease               # signed release APK, if signing is set up
 ```
 
 Run a single test class or method:
@@ -30,9 +31,14 @@ on every push to `main` and every pull request.
 ## Secrets and personal data
 
 The repo is public. Nothing secret is tracked, and `.gitignore` keeps keystores,
-`local.properties` and `.claude/` out. When release signing is added, the
-keystore and its passwords come from GitHub Actions secrets or environment
-variables, never from a tracked file.
+`local.properties` and `.claude/` out.
+
+Release signing reads `vaultdropStoreFile`, `vaultdropStorePassword` and
+`vaultdropKeyAlias` as Gradle properties: from `~/.gradle/gradle.properties` on
+the maintainer's machine, or from `ORG_GRADLE_PROJECT_*` variables fed by GitHub
+Actions secrets. Never put them in a tracked file. Without them
+`assembleRelease` still builds, unsigned. Every release must be signed with the
+same key, or it won't install over the one before it.
 
 Test data and examples are made up. Don't copy folder names, file names, dates
 or note counts out of anyone's real vault into tests, docs or commit messages.
