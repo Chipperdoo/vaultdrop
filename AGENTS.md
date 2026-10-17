@@ -24,6 +24,19 @@ There are no instrumented (`androidTest`) tests. Everything under `app/src/test`
 is a plain JVM test — `unitTests.isReturnDefaultValues = true` in
 `app/build.gradle.kts` is what lets `org.json` classes resolve without a device.
 
+CI (`.github/workflows/ci.yml`) runs the unit tests, lint and `assembleDebug`
+on every push to `main` and every pull request.
+
+## Secrets and personal data
+
+The repo is public. Nothing secret is tracked, and `.gitignore` keeps keystores,
+`local.properties` and `.claude/` out. When release signing is added, the
+keystore and its passwords come from GitHub Actions secrets or environment
+variables, never from a tracked file.
+
+Test data and examples are made up. Don't copy folder names, file names, dates
+or note counts out of anyone's real vault into tests, docs or commit messages.
+
 ## Architecture
 
 Single activity, single ViewModel, unidirectional state. `MainActivity` holds an

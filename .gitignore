@@ -31,8 +31,8 @@ captures/
 # OS
 .DS_Store
 
-# Local tool config
-.claude/settings.local.json
+# Claude Code: local settings and agent worktrees
+.claude/
 
 # Working notes
 vaultdrop-findings.html

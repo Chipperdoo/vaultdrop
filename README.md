@@ -86,6 +86,11 @@ The Gradle wrapper is checked in, so `./gradlew` works on a fresh clone.
 `local.properties` is not tracked — point `sdk.dir` at your SDK, set
 `ANDROID_HOME`, or let Android Studio write it on first open.
 
+GitHub Actions runs the unit tests, Android Lint and a debug build on every
+push to `main` and every pull request. It checks the wrapper JAR against the
+checksums Gradle publishes first, and the wrapper itself refuses a Gradle
+download that doesn't match `distributionSha256Sum`.
+
 ## How it works
 
 The app is organised around two phases rather than around screens, because
