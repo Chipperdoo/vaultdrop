@@ -393,9 +393,11 @@ private fun TopBar(
             .fillMaxWidth()
             .height(T.barHeight)
             .background(c.surfaceContainerHigh)
-            .padding(start = 16.dp, end = 6.dp),
+            // 8dp, then the dot's 24dp box: the dot lines up, near enough, with the note's 16dp margin.
+            .padding(start = 8.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        SavedDot(saved)
         Row(
             modifier = Modifier
                 .weight(1f)
@@ -435,7 +437,6 @@ private fun TopBar(
         BarButton(enabled = next, onClick = { onStepDay(1) }) {
             Chevron(barInk(next), pointsLeft = false)
         }
-        SavedDot(saved)
         BarButton(enabled = true, onClick = onOpenSearch) {
             SearchGlyph(c.onSurface)
         }
@@ -455,7 +456,8 @@ private fun TopBar(
  * file has not had yet, filled green once the last write has landed. That file
  * is what a sync client carries to the other devices, so green means it can.
  *
- * Not a button, so narrower than the 44dp tap targets either side of it.
+ * First in the bar, ahead of the date. Not a button, so narrower than the
+ * 44dp tap targets.
  */
 @Composable
 private fun SavedDot(saved: () -> Boolean) {

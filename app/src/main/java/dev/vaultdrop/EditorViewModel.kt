@@ -2140,6 +2140,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun onResumed() {
         val since = backgroundedAt
         backgroundedAt = 0L
+        // A save that failed on the way out left savedBody behind the field,
+        // and nothing else retries it until the next keystroke. Coming back
+        // is the first chance; when nothing is owed this stops at the skip check.
+        saveNow()
         rollOver()
         if (since == 0L || !phase2Started || walking) return
         if (System.currentTimeMillis() - since < RESUME_REINDEX_AFTER_MS) return
