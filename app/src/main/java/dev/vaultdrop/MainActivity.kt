@@ -139,6 +139,7 @@ fun VaultDropApp(vm: EditorViewModel) {
         else -> EditorScreen(
             state = state,
             body = vm.body,
+            saved = { vm.saved },
             onToggleFrontmatter = vm::toggleFrontmatter,
             onOpenDays = vm::openDays,
             onCloseDays = vm::closeDays,
@@ -147,6 +148,7 @@ fun VaultDropApp(vm: EditorViewModel) {
             onOpenSearch = vm::openSearch,
             onPickLink = { vm.insertLink(it.name) },
             onDismissNotice = vm::dismissNotice,
+            onDismissDefaults = vm::dismissDefaults,
             onChangeVault = vm::changeVault,
             onReloadConfig = vm::reloadConfig,
             onAskReindex = vm::askReindex,

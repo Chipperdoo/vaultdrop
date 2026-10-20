@@ -76,6 +76,19 @@ fun FirstRunScreen(
             CapabilityRow("never", "anything else in the vault", accent = false)
             Spacer(Modifier.height(26.dp))
 
+            // The picker hands back whichever folder is open when Use this
+            // folder is tapped, so the easy mistakes are one level off either
+            // way: the folder holding the vault, or the daily notes folder.
+            // Short, because the screen does not scroll; the "Not a vault"
+            // card spells out both mistakes if one is made.
+            Text(
+                "In the picker, go into your vault's own folder, the one with the vault's name, " +
+                    "then tap Use this folder.",
+                style = T.lede,
+                color = c.onSurface,
+            )
+            Spacer(Modifier.height(18.dp))
+
             Box(
                 modifier = Modifier
                     .fillMaxWidth()

@@ -235,6 +235,15 @@ own state changes, the other is the autosave debounce (`collectLatest`, which is
 where `saveJob` went). Anything that must stop a pending save sets `note = null`
 rather than cancelling a job; `saveNow` stops there.
 
+The debounce is two seconds, not a few hundred milliseconds, because every write
+is a new version for the user's sync client to carry, and a short one wrote at
+every pause mid-sentence. Writes to the open note go through `noteWriter`, one
+at a time and in order, so two can't land oldest-last. The top bar's saved dot
+reads `saved`, which is its own `mutableStateOf` for the same reason the body
+is: it flips on the first keystroke after every save. `refreshSaved` derives it
+from `note`, `savedBody` and the writes still out; call it after changing any of
+them outside the autosave collector.
+
 `index` is `@Volatile`: written by the walk on IO, read by search and link jobs
 off it. Jobs snapshot it into a local before suspending.
 
