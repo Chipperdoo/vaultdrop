@@ -451,7 +451,7 @@ fun MissingConfigCard(config: VaultConfig, onDismiss: () -> Unit) {
         Text(
             "Change them in Obsidian under Settings → Daily notes. VaultDrop picks the change up on its own.",
             style = T.cardBody,
-            color = c.outline,
+            color = c.onSurfaceVariant,
         )
         Spacer(Modifier.height(4.dp))
         Row(Modifier.align(Alignment.End)) {
@@ -464,8 +464,9 @@ fun MissingConfigCard(config: VaultConfig, onDismiss: () -> Unit) {
 private fun DefaultRow(label: String, value: String, muted: Boolean) {
     val c = MaterialTheme.colorScheme
     Row {
-        Text(label, style = T.cardRow, color = c.outline, modifier = Modifier.width(64.dp))
+        // onSurfaceVariant, not outline: outline is under 4.5:1 on the card at this size.
+        Text(label, style = T.cardRow, color = c.onSurfaceVariant, modifier = Modifier.width(64.dp))
         Spacer(Modifier.width(10.dp))
-        Text(value, style = T.cardRow, color = if (muted) c.outline else c.onSurface)
+        Text(value, style = T.cardRow, color = if (muted) c.onSurfaceVariant else c.onSurface)
     }
 }
