@@ -26,7 +26,11 @@ is a plain JVM test — `unitTests.isReturnDefaultValues = true` in
 `app/build.gradle.kts` is what lets `org.json` classes resolve without a device.
 
 CI (`.github/workflows/ci.yml`) runs the unit tests, lint and `assembleDebug`
-on every push to `main` and every pull request.
+on every push to `main` and every pull request. It also builds the preview APK
+and uploads it, unzipped, as the run's artifact
+(`vaultdrop-<versionName>-preview-<sha>.apk`), so a change can be installed on a
+phone straight from the PR. CI signs it with a fresh debug key every run, so a
+newer one won't install over an older one: uninstall the preview first.
 
 ## Secrets and personal data
 
