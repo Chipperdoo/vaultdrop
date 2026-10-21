@@ -60,6 +60,16 @@ class ConfigStore(context: Context) {
         set(value) = prefs.edit { putBoolean(KEY_TRASH_EXPLAINED, value) }
 
     /**
+     * Whether the card saying this vault runs on Obsidian's default Daily Notes
+     * settings has been put away. It describes the vault rather than a fault,
+     * so once read it stays out of the way. A different vault is a different
+     * story, and [clear] forgets this with the rest.
+     */
+    var defaultsNoted: Boolean
+        get() = prefs.getBoolean(KEY_DEFAULTS_NOTED, false)
+        set(value) = prefs.edit { putBoolean(KEY_DEFAULTS_NOTED, value) }
+
+    /**
      * The app the mic hands speech to, once the user has picked one. Kept
      * across a change of vault: which apps are installed is a fact about this
      * phone, not about the vault. Read on a mic tap, never by Phase 1.
@@ -91,6 +101,7 @@ class ConfigStore(context: Context) {
         const val KEY_LINTER = "linter"
         const val KEY_APP = "app"
         const val KEY_TRASH_EXPLAINED = "trash_fallback_explained"
+        const val KEY_DEFAULTS_NOTED = "defaults_noted"
         const val KEY_VOICE = "voice_engine"
     }
 }

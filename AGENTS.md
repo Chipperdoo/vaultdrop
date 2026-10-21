@@ -26,7 +26,11 @@ is a plain JVM test — `unitTests.isReturnDefaultValues = true` in
 `app/build.gradle.kts` is what lets `org.json` classes resolve without a device.
 
 CI (`.github/workflows/ci.yml`) runs the unit tests, lint and `assembleDebug`
-on every push to `main` and every pull request.
+on every push to `main` and every pull request. It also builds the preview APK
+and uploads it, unzipped, as the run's artifact
+(`vaultdrop-<versionName>-preview-<sha>.apk`), so a change can be installed on a
+phone straight from the PR. CI signs it with a fresh debug key every run, so a
+newer one won't install over an older one: uninstall the preview first.
 
 ## Secrets and personal data
 
@@ -234,6 +238,15 @@ hang off it: one drives the `[[` strip and writes state *only* when the strip's
 own state changes, the other is the autosave debounce (`collectLatest`, which is
 where `saveJob` went). Anything that must stop a pending save sets `note = null`
 rather than cancelling a job; `saveNow` stops there.
+
+The debounce is two seconds, not a few hundred milliseconds, because every write
+is a new version for the user's sync client to carry, and a short one wrote at
+every pause mid-sentence. Writes to the open note go through `noteWriter`, one
+at a time and in order, so two can't land oldest-last. The top bar's saved dot
+reads `saved`, which is its own `mutableStateOf` for the same reason the body
+is: it flips on the first keystroke after every save. `refreshSaved` derives it
+from `note`, `savedBody` and the writes still out; call it after changing any of
+them outside the autosave collector.
 
 `index` is `@Volatile`: written by the walk on IO, read by search and link jobs
 off it. Jobs snapshot it into a local before suspending.

@@ -157,6 +157,8 @@ data class UiState(
      */
     val captureInFlight: Boolean = false,
     val configMissing: Boolean = false,
+    /** The defaults card has been read and put away for this vault; see [ConfigStore.defaultsNoted]. */
+    val defaultsNoted: Boolean = false,
     val config: VaultConfig = VaultConfig(),
     // Phase 2
     /** Pass one is still running: no names yet, so the `[[` picker has nothing. */
@@ -208,6 +210,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * rebuilding the note around it.
      */
     val body = TextFieldState()
+
+    /**
+     * Whether the note's file holds exactly what the field does: nothing typed
+     * since the last write, and no write still on its way. The top bar's dot.
+     *
+     * Its own state rather than a field of [UiState], for the reason [body] is:
+     * it flips on the first keystroke after every save, and copying [UiState]
+     * for that would invalidate everything reading it. Only the dot reads this.
+     */
+    var saved by mutableStateOf(false)
+        private set
+
+    /** Writes [saveNow] has started that have not come back. Main thread only. */
+    private var writing = 0
+
+    /**
+     * Note writes, one at a time and in the order they were asked for. Two
+     * writes to one file running side by side could land oldest-last, and every
+     * extra write is another version for a sync client to reconcile.
+     */
+    private val noteWriter = Dispatchers.IO.limitedParallelism(1)
 
     private val store = ConfigStore(app)
 
@@ -329,7 +352,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // character. The first emission arrives before there is a note to save
         // to, and saveNow stops at that.
         viewModelScope.launch {
-            snapshotFlow { body.text }.collectLatest {
+            snapshotFlow { body.text }.collectLatest { text ->
+                refreshSaved(text)
                 delay(SAVE_DEBOUNCE_MS)
                 saveNow()
             }
@@ -390,7 +414,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             createDay(today, showCreatedNotice = false)
         }
-        state = state.copy(screen = Screen.Editor, config = cached, configMissing = !cached.present)
+        state = state.copy(
+            screen = Screen.Editor,
+            config = cached,
+            configMissing = !cached.present,
+            defaultsNoted = store.defaultsNoted,
+        )
     }
 
     private fun hasGrant(uri: Uri): Boolean =
@@ -419,7 +448,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             state = state.copy(
                 screen = Screen.FirstRun,
                 vaultErrorTitle = "Not a vault",
-                vaultErrorDetail = ".obsidian/ not found in $name",
+                vaultErrorDetail = ".obsidian/ not found in $name. Pick the vault's own folder, " +
+                    "the one with the vault's name: not the folder above it, and not one inside it.",
             )
             return
         }
@@ -450,7 +480,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
             val lines = listOf(
                 VerifyLine(".obsidian/", "found"),
-                VerifyLine("daily-notes.json", if (config.present) "read" else "not found"),
+                VerifyLine("daily-notes.json", if (config.present) "read" else "using defaults"),
                 VerifyLine("format", config.format),
                 VerifyLine("folder", config.folder.ifEmpty { "vault root" }),
                 VerifyLine("template", config.template.ifEmpty { "none" }),
@@ -694,26 +724,43 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val text = body.text.toString()
         if (text == savedBody) return
         savedBody = text
+        writing++
+        saved = false
 
-        viewModelScope.launch(Dispatchers.IO) {
-            val written = repository.save(current, text, linterConfig)
-            if (written == null) {
-                // Don't go on believing this body reached the file — let the next
-                // save try again instead of stranding it behind the skip check.
-                withContext(Dispatchers.Main) { if (savedBody == text) savedBody = null }
-                return@launch
-            }
-            if (written == current.frontmatter) return@launch
-            // The stamp moved, so the note in hand and the chip both have to
-            // follow, or the next save would edit the fence we just replaced.
-            val stamped = current.copy(frontmatter = written)
-            withContext(Dispatchers.Main) {
+        viewModelScope.launch {
+            try {
+                // Queued behind any write still out, and finished even if the
+                // view model is cleared meanwhile: this is onPause's save too.
+                val written = withContext(NonCancellable + noteWriter) {
+                    repository.save(current, text, linterConfig)
+                }
+                if (written == null) {
+                    // Don't go on believing this body reached the file — let the next
+                    // save try again instead of stranding it behind the skip check.
+                    if (savedBody == text) savedBody = null
+                    return@launch
+                }
+                if (written == current.frontmatter) return@launch
+                // The stamp moved, so the note in hand and the chip both have to
+                // follow, or the next save would edit the fence we just replaced.
                 if (note === current) {
-                    note = stamped
+                    note = current.copy(frontmatter = written)
                     state = state.copy(frontmatter = written)
                 }
+            } finally {
+                writing--
+                refreshSaved()
             }
         }
+    }
+
+    /**
+     * Re-derives [saved]. [text] is the field's own buffer: the comparison runs
+     * against it in place, and a keystroke that changed the length is told
+     * apart on the first check, so typing copies nothing for this.
+     */
+    private fun refreshSaved(text: CharSequence = body.text) {
+        saved = note != null && writing == 0 && savedBody?.contentEquals(text) == true
     }
 
     // ── Capturing ────────────────────────────────────────────────────────────
@@ -1295,6 +1342,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         openDate = date
         anchoredTo = LocalDate.now()
         body.clearText()
+        refreshSaved()
         shareOpensGap = false
         state = state.copy(
             dateLabel = DailyNote.label(activeConfig, date),
@@ -1357,6 +1405,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val gap = if (shareOpensGap) Sharing.separator(opened.body) else ""
         shareOpensGap = false
         body.setTextAndPlaceCursorAtEnd(if (typed.isEmpty()) opened.body else opened.body + gap + typed)
+        // Not left to the autosave collector: a note opened with the same text
+        // the field already held is no edit, so nothing would emit.
+        refreshSaved()
 
         state = state.copy(
             dateLabel = DailyNote.label(activeConfig, date),
@@ -1466,17 +1517,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (state.captureInFlight) return
         val date = openDate
         note = null
+        refreshSaved()
         state = state.copy(deleteOpen = false)
 
         viewModelScope.launch {
             val text = body.text.toString()
-            val trashed = withContext(Dispatchers.IO) {
+            // Behind any autosave still out, so none of them lands between
+            // the trash copy and the delete.
+            val trashed = withContext(noteWriter) {
                 if (text != savedBody) repository.save(current, text, linterConfig)
                 repository.trash(current, appConfig.trash)
             }
             if (trashed == null) {
                 // Still where it was, so saving can resume against it.
                 note = current
+                refreshSaved()
                 state = state.copy(notice = "Could not delete ${current.path.relativePath}.")
                 return@launch
             }
@@ -1732,6 +1787,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun dismissNotice() {
         state = state.copy(notice = null, noticeApp = null)
+    }
+
+    /** The defaults card's Got it. It stays put away until another vault is picked. */
+    fun dismissDefaults() {
+        store.defaultsNoted = true
+        state = state.copy(defaultsNoted = true)
     }
 
     /** Overflow: hand the vault back to the picker. */
@@ -2079,6 +2140,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun onResumed() {
         val since = backgroundedAt
         backgroundedAt = 0L
+        // A save that failed on the way out left savedBody behind the field,
+        // and nothing else retries it until the next keystroke. Coming back
+        // is the first chance; when nothing is owed this stops at the skip check.
+        saveNow()
         rollOver()
         if (since == 0L || !phase2Started || walking) return
         if (System.currentTimeMillis() - since < RESUME_REINDEX_AFTER_MS) return
@@ -2121,7 +2186,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         /** Long enough that pausing to read a link or answer a message is not a rescan. */
         const val RESUME_REINDEX_AFTER_MS = 3 * 60 * 1000L
         const val STEP_MS = 230L
-        const val SAVE_DEBOUNCE_MS = 600L
+
+        /**
+         * How long the typing has to stop before the note is written. Every
+         * write is a new version of the file for a sync client to carry to the
+         * other devices, and with the Linter on it restamps `date modified` as
+         * well. At 600ms a pause to think mid-sentence was a write, and each
+         * one is another chance for Syncthing to find the file changed on two
+         * devices before they caught up with each other: a conflict. Leaving
+         * the app or the day saves at once anyway.
+         */
+        const val SAVE_DEBOUNCE_MS = 2_000L
 
         /**
          * Long enough that a burst of typing starts one scan rather than one per

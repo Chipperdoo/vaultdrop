@@ -43,6 +43,14 @@ private val LightError = Color(0xFFBA1A1A)
 private val LightErrorContainer = Color(0xFFFFDAD6)
 private val LightOnErrorContainer = Color(0xFF410002)
 
+/**
+ * The top bar's saved dot, the one fixed hue in the chrome: saved reads as
+ * green whatever the wallpaper made of everything else. Each clears 3:1
+ * against its fallback bar (8.4 dark, 4.3 light), the bar for a graphic.
+ */
+val SavedDark = Color(0xFF7BD88F)
+val SavedLight = Color(0xFF1F7A3A)
+
 val VaultDropDarkScheme = darkColorScheme(
     primary = DarkPrimary,
     onPrimary = DarkOnPrimary,

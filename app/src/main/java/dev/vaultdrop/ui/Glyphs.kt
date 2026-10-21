@@ -79,6 +79,18 @@ fun SearchGlyph(color: Color, size: Dp = 18.dp, modifier: Modifier = Modifier) {
     }
 }
 
+/** A ring with an "i" in it: something worth knowing that is not a problem. */
+@Composable
+fun InfoGlyph(color: Color, size: Dp = 15.dp, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(size)) {
+        val w = this.size.width
+        val stroke = 1.3.dp.toPx()
+        drawCircle(color, radius = w / 2f - stroke / 2f, style = Stroke(width = stroke))
+        drawLine(color, Offset(w / 2f, w * 0.45f), Offset(w / 2f, w * 0.72f), stroke, StrokeCap.Round)
+        drawCircle(color, radius = stroke * 0.8f, center = Offset(w / 2f, w * 0.29f))
+    }
+}
+
 @Composable
 fun CloseGlyph(color: Color, size: Dp = 13.dp, modifier: Modifier = Modifier) {
     Canvas(modifier.size(size)) {

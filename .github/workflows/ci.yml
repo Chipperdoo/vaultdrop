@@ -19,4 +19,23 @@ jobs:
           java-version: 17
       # Also checks gradle-wrapper.jar against Gradle's published checksums.
       - uses: gradle/actions/setup-gradle@v6
-      - run: ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+      - run: ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assemblePreview
+      # The preview build installs beside the real app (dev.vaultdrop.preview),
+      # so a change can be tried on the phone without touching the everyday copy.
+      # Named for its version and commit, and uploaded unzipped so a phone
+      # downloads an .apk it can install.
+      - name: Name the preview APK
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          version=$(sed -n 's/.*versionName = "\(.*\)"/\1/p' app/build.gradle.kts)
+          apk="dist/vaultdrop-$version-preview-${SHA::7}.apk"
+          mkdir -p dist
+          cp app/build/outputs/apk/preview/app-preview.apk "$apk"
+          echo "APK=$apk" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.APK }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 30

@@ -413,32 +413,49 @@ private fun DialogAction(label: String, color: androidx.compose.ui.graphics.Colo
 }
 
 /**
- * Board 1c, left. A vault where Daily Notes was never opened has no config file
- * — that is the defaults column of the brief's table, not a failure.
+ * Board 1c, left. A vault where Daily Notes was never changed from its defaults
+ * has no config file. That is the defaults column of the brief's table, not a
+ * failure, so the card reads as a note about the vault: neutral ink, an "i"
+ * where an accent would sound an alarm, and a Got it that puts it away.
  */
 @Composable
-fun MissingConfigCard(config: VaultConfig) {
+fun MissingConfigCard(config: VaultConfig, onDismiss: () -> Unit) {
     val c = MaterialTheme.colorScheme
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp)
+            .padding(start = 16.dp, end = 16.dp, top = 12.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(c.surfaceContainerHigh)
-            .padding(16.dp),
+            .background(c.surfaceContainer)
+            .padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 6.dp),
     ) {
-        Text("No Daily Notes config", style = T.cardTitle, color = c.primary)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            InfoGlyph(c.onSurfaceVariant)
+            Spacer(Modifier.width(9.dp))
+            Text("Using default daily note settings", style = T.cardTitle, color = c.onSurface)
+        }
         Spacer(Modifier.height(9.dp))
         Text(
-            ".obsidian/daily-notes.json is missing.\nUsing defaults until it appears.",
+            "This vault has no .obsidian/daily-notes.json, which is normal if Daily Notes " +
+                "was never changed from its defaults. VaultDrop uses the same ones Obsidian does:",
             style = T.cardBody,
             color = c.onSurfaceVariant,
         )
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(12.dp))
         Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
             DefaultRow("format", config.format, muted = false)
             DefaultRow("folder", config.folder.ifEmpty { "vault root" }, muted = config.folder.isEmpty())
             DefaultRow("template", config.template.ifEmpty { "none" }, muted = config.template.isEmpty())
+        }
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "Change them in Obsidian under Settings → Daily notes. VaultDrop picks the change up on its own.",
+            style = T.cardBody,
+            color = c.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(4.dp))
+        Row(Modifier.align(Alignment.End)) {
+            DialogAction("GOT IT", c.primary, onDismiss)
         }
     }
 }
@@ -447,8 +464,9 @@ fun MissingConfigCard(config: VaultConfig) {
 private fun DefaultRow(label: String, value: String, muted: Boolean) {
     val c = MaterialTheme.colorScheme
     Row {
-        Text(label, style = T.cardRow, color = c.outline, modifier = Modifier.width(64.dp))
+        // onSurfaceVariant, not outline: outline is under 4.5:1 on the card at this size.
+        Text(label, style = T.cardRow, color = c.onSurfaceVariant, modifier = Modifier.width(64.dp))
         Spacer(Modifier.width(10.dp))
-        Text(value, style = T.cardRow, color = if (muted) c.outline else c.onSurface)
+        Text(value, style = T.cardRow, color = if (muted) c.onSurfaceVariant else c.onSurface)
     }
 }
