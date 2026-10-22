@@ -17,7 +17,10 @@ you just need to write something down.
   open, no scan.
 - **Creates the note from your template** if today's doesn't exist yet, with
   `{{date}}` and `{{time}}` resolved. Existing notes are never rewritten.
-- **Autosaves** on a 600 ms pause and when you leave the app.
+- **Autosaves** once you stop typing for two seconds, and when you leave the
+  app or the day, and tries again when you come back if a save failed. The dot
+  at the left of the top bar is a ring while there is typing the file hasn't had
+  yet, and fills green once it's written.
 - **`[[` autocomplete** against every note name in the vault.
 - **Search** — filter names as you type, or press Search to read inside every
   note in the vault.

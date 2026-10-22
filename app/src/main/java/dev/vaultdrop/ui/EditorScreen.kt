@@ -3,6 +3,7 @@ package dev.vaultdrop.ui
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
@@ -45,6 +46,9 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.LaunchedEffect
@@ -52,6 +56,8 @@ import dev.vaultdrop.DayRow
 import dev.vaultdrop.UiState
 import dev.vaultdrop.VoiceOption
 import dev.vaultdrop.core.IndexEntry
+import dev.vaultdrop.ui.theme.SavedDark
+import dev.vaultdrop.ui.theme.SavedLight
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.min
@@ -65,6 +71,11 @@ import kotlin.math.min
 fun EditorScreen(
     state: UiState,
     body: TextFieldState,
+    /**
+     * Whether the note is in its file yet. A lambda rather than a value, so
+     * the flip on the first keystroke after a save recomposes the dot alone.
+     */
+    saved: () -> Boolean,
     onToggleFrontmatter: () -> Unit,
     onOpenDays: () -> Unit,
     onCloseDays: () -> Unit,
@@ -73,6 +84,7 @@ fun EditorScreen(
     onOpenSearch: () -> Unit,
     onPickLink: (IndexEntry) -> Unit,
     onDismissNotice: () -> Unit,
+    onDismissDefaults: () -> Unit,
     onChangeVault: () -> Unit,
     onReloadConfig: () -> Unit,
     onAskReindex: () -> Unit,
@@ -129,6 +141,7 @@ fun EditorScreen(
                 canGoPrev = state.canGoPrev,
                 canGoNext = state.canGoNext,
                 pinned = state.captureInFlight,
+                saved = saved,
                 onOpenDays = onOpenDays,
                 onStepDay = onStepDay,
                 onOpenSearch = onOpenSearch,
@@ -139,9 +152,9 @@ fun EditorScreen(
                 onVoiceInput = onMicSettings,
             )
 
-            if (state.configMissing) {
-                MissingConfigCard(state.config)
-                Spacer(Modifier.height(20.dp))
+            if (state.configMissing && !state.defaultsNoted) {
+                MissingConfigCard(state.config, onDismiss = onDismissDefaults)
+                Spacer(Modifier.height(8.dp))
             }
 
             // Frontmatter and the note body share one scroll: the chip is the top of
@@ -364,6 +377,7 @@ private fun TopBar(
     canGoNext: Boolean,
     /** A capture holds the note on screen, so nothing here may leave it. */
     pinned: Boolean,
+    saved: () -> Boolean,
     onOpenDays: () -> Unit,
     onStepDay: (Int) -> Unit,
     onOpenSearch: () -> Unit,
@@ -379,9 +393,11 @@ private fun TopBar(
             .fillMaxWidth()
             .height(T.barHeight)
             .background(c.surfaceContainerHigh)
-            .padding(start = 16.dp, end = 6.dp),
+            // 8dp, then the dot's 24dp box: the dot lines up, near enough, with the note's 16dp margin.
+            .padding(start = 8.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        SavedDot(saved)
         Row(
             modifier = Modifier
                 .weight(1f)
@@ -431,6 +447,38 @@ private fun TopBar(
             onAskReindex = onAskReindex,
             onAskDelete = onAskDelete,
             onVoiceInput = onVoiceInput,
+        )
+    }
+}
+
+/**
+ * Whether the note on screen is in its file: a ring while there is typing the
+ * file has not had yet, filled green once the last write has landed. That file
+ * is what a sync client carries to the other devices, so green means it can.
+ *
+ * First in the bar, ahead of the date. Not a button, so narrower than the
+ * 44dp tap targets.
+ */
+@Composable
+private fun SavedDot(saved: () -> Boolean) {
+    val c = MaterialTheme.colorScheme
+    val isSaved = saved()
+    val green = if (c.surface.luminance() < 0.5f) SavedDark else SavedLight
+    Box(
+        Modifier
+            .width(24.dp)
+            .height(T.touch)
+            .semantics { contentDescription = if (isSaved) "Saved" else "Not saved yet" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(10.dp)
+                .clip(CircleShape)
+                .then(
+                    if (isSaved) Modifier.background(green)
+                    else Modifier.border(1.5.dp, c.outline, CircleShape),
+                ),
         )
     }
 }
