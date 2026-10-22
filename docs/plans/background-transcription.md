@@ -166,7 +166,7 @@ After the transcript is in the note and written to the vault. Not when the
 engine answers.
 
 `land()` splices the transcript into the field. The write to the vault comes
-600 ms later, from the autosave debounce. If the hold went at the engine's
+2 seconds later, from the autosave debounce. If the hold went at the engine's
 answer, VaultDrop would drop back into the cache with the transcript only in
 memory. A cached app can't hold a wake lock, so the phone may sleep before the
 write runs, and the freezer stops the process 10 seconds later if it hasn't.
@@ -180,7 +180,9 @@ So the end of a request becomes:
 4. `awake.release()`
 
 `saveNow()` returns the `Job` it launches, or null when there is nothing to
-write. Its other caller, `onPause`, ignores the result.
+write. Every other caller ignores the result. Writes go through `noteWriter`
+one at a time, so joining this one also waits out any write queued ahead of
+it, and the write itself is `NonCancellable`.
 
 The save goes before `unpin()` on purpose. `unpin()` can run `rollOver()`,
 which, after midnight, saves the old note and opens the new day. A save after
